@@ -28,6 +28,7 @@ from misdirection.core.adaptive import (
     InMemorySessionStore,
 )
 from misdirection.core.cmpe import CMPEConfig, CMPEEngine
+from misdirection.core.context_filter import ContextFilter, ContextSource
 from misdirection.detector.intention import IntentionDetector, IntentionLabel
 from misdirection.eval.metrics import (
     DefenseConfig,
@@ -55,6 +56,8 @@ class GatewayState:
         # Adaptive controller (Frente 1)
         self.session_store = InMemorySessionStore()
         self.adaptive = AdaptiveController(config=AdaptiveConfig())
+        # Context filter (Frente 2)
+        self.context_filter = ContextFilter()
         # Metrics
         self.total_requests: int = 0
         self.misdirected_requests: int = 0
@@ -102,12 +105,45 @@ async def chat_completions(request: Request):
 
     Adaptive mode: if X-Session-ID header is provided, the controller
     escalates defense intensity based on accumulated suspicion.
+
+    Context filtering: if context_sources field is provided in the body,
+    each external context source is filtered for indirect injections
+    before being forwarded to the upstream LLM.
     """
     body = await request.json()
     state.total_requests += 1
 
     # Extract session ID (optional — enables adaptive mode)
     session_id = request.headers.get("X-Session-ID", "")
+
+    # --- Frente 2: Context filtering ---
+    context_sources = body.get("context_sources", [])
+    filtered_sources = []
+    context_filter_results = []
+    if context_sources:
+        for src in context_sources:
+            source = ContextSource(
+                source_id=src.get("source_id", "unknown"),
+                content=src.get("content", ""),
+                source_type=src.get("source_type", "rag"),
+                metadata=src.get("metadata", {}),
+            )
+            result = state.context_filter.filter_source(source)
+            filtered_sources.append({
+                "source_id": result.source_id,
+                "content": result.sanitized_content,
+                "source_type": source.source_type,
+                "was_modified": result.was_modified,
+            })
+            if result.was_modified:
+                context_filter_results.append({
+                    "source_id": result.source_id,
+                    "intention": result.detected_intention,
+                    "confidence": result.confidence,
+                    "transformation": result.transformation_applied,
+                })
+        # Replace context_sources in body with filtered versions
+        body["context_sources"] = filtered_sources
 
     # Extract user messages
     messages = body.get("messages", [])
@@ -156,36 +192,43 @@ async def chat_completions(request: Request):
                 was_misdirected=True,
             )
 
-        return JSONResponse(
-            content={
-                "id": f"misdirect-{int(time.time() * 1000)}",
-                "object": "chat.completion",
-                "created": int(time.time()),
-                "model": "misdirection-gateway",
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {
-                            "role": "assistant",
-                            "content": misdirection.full_response,
-                        },
-                        "finish_reason": "stop",
-                    }
-                ],
-                "usage": {
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "total_tokens": 0,
-                },
-                "misdirection": {
-                    "triggered": True,
-                    "intention": intention.detected_intention,
-                    "confidence": intention.confidence,
-                    "gamma_a": round(gamma_a, 4),
-                    "adaptive": bool(session_id),
-                },
+        response_content = {
+            "id": f"misdirect-{int(time.time() * 1000)}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": "misdirection-gateway",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": misdirection.full_response,
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+            },
+            "misdirection": {
+                "triggered": True,
+                "intention": intention.detected_intention,
+                "confidence": intention.confidence,
+                "gamma_a": round(gamma_a, 4),
+                "adaptive": bool(session_id),
+            },
+        }
+
+        # Include context filter results if any
+        if context_filter_results:
+            response_content["context_filter"] = {
+                "sources_filtered": len(context_filter_results),
+                "details": context_filter_results,
             }
-        )
+
+        return JSONResponse(content=response_content)
 
     # Benign or suspicious — forward to upstream LLM
     return await _forward_to_upstream(body)
