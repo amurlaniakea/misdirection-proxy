@@ -22,6 +22,11 @@ import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from misdirection.core.adaptive import (
+    AdaptiveConfig,
+    AdaptiveController,
+    InMemorySessionStore,
+)
 from misdirection.core.cmpe import CMPEConfig, CMPEEngine
 from misdirection.detector.intention import IntentionDetector, IntentionLabel
 from misdirection.eval.metrics import (
@@ -47,6 +52,9 @@ class GatewayState:
             misdirection_threshold=0.5,
             log_decisions=True,
         )
+        # Adaptive controller (Frente 1)
+        self.session_store = InMemorySessionStore()
+        self.adaptive = AdaptiveController(config=AdaptiveConfig())
         # Metrics
         self.total_requests: int = 0
         self.misdirected_requests: int = 0
@@ -91,28 +99,62 @@ async def chat_completions(request: Request):
 
     Intercepts the user message, applies misdirection defense if malicious,
     otherwise forwards to the upstream LLM.
+
+    Adaptive mode: if X-Session-ID header is provided, the controller
+    escalates defense intensity based on accumulated suspicion.
     """
     body = await request.json()
     state.total_requests += 1
+
+    # Extract session ID (optional — enables adaptive mode)
+    session_id = request.headers.get("X-Session-ID", "")
 
     # Extract user messages
     messages = body.get("messages", [])
     user_content = _extract_user_content(messages)
 
     if not user_content:
-        # No user content to analyze — forward as-is
         return await _forward_to_upstream(body)
 
     # Analyze intention
     intention = state.detector.detect(user_content)
 
+    # Adaptive mode: record session and get escalated config
+    adaptive_config = None
+    gamma_a = state.adaptive.config.gamma_base
+    if session_id:
+        session = state.session_store.record(
+            session_id=session_id,
+            intention_label=intention.label.value,
+            confidence=intention.confidence,
+            was_misdirected=False,  # updated below
+        )
+        adaptive_config = state.adaptive.get_adaptive_cmpe_config(
+            session.cumulative_suspicion
+        )
+        gamma_a = session.current_gamma_a
+
     if intention.label == IntentionLabel.MALICIOUS and intention.confidence >= state.proxy_config.misdirection_threshold:
-        # Generate misdirection response
-        misdirection = state.engine.generate(
+        # Generate misdirection with adaptive config if available
+        if adaptive_config:
+            engine = CMPEEngine(config=adaptive_config)
+        else:
+            engine = state.engine
+
+        misdirection = engine.generate(
             prompt=user_content,
             detected_intention=intention.detected_intention,
         )
         state.misdirected_requests += 1
+
+        # Update session with misdirect result
+        if session_id:
+            state.session_store.record(
+                session_id=session_id,
+                intention_label=intention.label.value,
+                confidence=intention.confidence,
+                was_misdirected=True,
+            )
 
         return JSONResponse(
             content={
@@ -139,6 +181,8 @@ async def chat_completions(request: Request):
                     "triggered": True,
                     "intention": intention.detected_intention,
                     "confidence": intention.confidence,
+                    "gamma_a": round(gamma_a, 4),
+                    "adaptive": bool(session_id),
                 },
             }
         )
