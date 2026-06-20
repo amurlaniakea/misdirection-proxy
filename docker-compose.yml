@@ -1,0 +1,129 @@
+# Misdirection Proxy + Ollama — Docker Compose
+# Usage:
+#   docker compose up -d           # Start all services
+#   docker compose run --rm bench  # Run adversarial benchmark
+#   docker compose down            # Stop all services
+#
+# Ollama models are persisted in the ollama-data volume.
+# To preload a model: docker compose exec ollama ollama pull qwen2:0.5b
+
+version: "3.9"
+
+services:
+  # ── Misdirection Proxy Gateway ──────────────────────────────
+  proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: misdirection-proxy
+    ports:
+      - "8000:8000"
+    environment:
+      - UPSTREAM_LLM_URL=http://ollama:11434
+      - OLLAMA_HOST=http://ollama:11434
+    depends_on:
+      ollama-ready:
+        condition: service_completed_successfully
+    networks:
+      - misdirection-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ── Ollama Local LLM ────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: misdirection-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    networks:
+      - misdirection-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  # ── Model Preloader ─────────────────────────────────────────
+  # Downloads the model before the proxy starts serving requests.
+  # Uses qwen2:0.5b by default (small, fast, good enough for bench).
+  # Override with OLLAMA_MODEL env var.
+  ollama-ready:
+    image: ollama/ollama:latest
+    container_name: misdirection-ollama-setup
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2:0.5b}
+    networks:
+      - misdirection-net
+    depends_on:
+      ollama:
+        condition: service_healthy
+    entrypoint: >
+      sh -c '
+        echo "[setup] Waiting for Ollama daemon..."
+        until curl -sf http://ollama:11434/ > /dev/null 2>&1; do
+          sleep 2
+        done
+        echo "[setup] Ollama is ready. Pulling model: $${OLLAMA_MODEL}"
+        curl -s http://ollama:11434/api/pull -d "{\"name\": \"$${OLLAMA_MODEL}\"}"
+        echo "[setup] Model ready."
+      '
+    restart: "no"
+
+  # ── Adversarial Benchmark Runner ────────────────────────────
+  # Runs the benchmark against proxy + Ollama and saves report.
+  # Mounts ./reports volume for persistent output.
+  bench:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: misdirection-bench
+    environment:
+      - PROXY_URL=http://proxy:8000
+      - OLLAMA_HOST=http://ollama:11434
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2:0.5b}
+    volumes:
+      - ./reports:/app/reports
+    networks:
+      - misdirection-net
+    depends_on:
+      ollama-ready:
+        condition: service_completed_successfully
+    profiles:
+      - bench  # Only run when explicitly requested
+    entrypoint: >
+      sh -c '
+        echo "[bench] Running adversarial benchmark..."
+        python -m misdirection.eval.bench \
+          --mode deterministic \
+          --rounds 20 \
+          --session-id docker-bench \
+          --proxy-url http://proxy:8000 \
+          --output /app/reports/eval_report_deterministic.json
+        echo "[bench] Running Ollama benchmark..."
+        python -m misdirection.eval.bench \
+          --mode ollama \
+          --rounds 20 \
+          --session-id docker-bench-ollama \
+          --proxy-url http://proxy:8000 \
+          --output /app/reports/eval_report_ollama.json
+        echo "[bench] Reports saved to /app/reports/"
+        ls -la /app/reports/
+      '
+
+# ── Networks ─────────────────────────────────────────────────
+networks:
+  misdirection-net:
+    driver: bridge
+
+# ── Volumes ─────────────────────────────────────────────────
+volumes:
+  ollama-data:
+    driver: local

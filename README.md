@@ -136,9 +136,53 @@ Measures: PPV degradation, γ_A escalation, ASR, latency per request.
 
 ---
 
+## 🐳 Docker Compose (Recommended)
+
+The full stack (Proxy + Ollama + Benchmark) can be deployed with a single command:
+
+```bash
+# Clone and start
+git clone https://github.com/amurlaniakea/misdirection-proxy.git
+cd misdirection-proxy
+
+# Start proxy + Ollama (downloads qwen2:0.5b by default)
+docker compose up -d
+
+# Run the adversarial benchmark
+docker compose --profile bench run --rm bench
+
+# View reports
+ls reports/
+
+# Stop everything
+docker compose down
+```
+
+### Custom Model
+
+```bash
+# Use a different model (e.g., llama3:8b)
+OLLAMA_MODEL=llama3:8b docker compose up -d
+```
+
+### Architecture
+
+```
+docker-compose.yml
+├── proxy          → FastAPI gateway (port 8000)
+├── ollama         → Ollama LLM daemon (port 11434)
+├── ollama-ready   → Model preloader (runs once)
+└── bench          → Adversarial benchmark runner (profile: bench)
+```
+
+All services communicate over an isolated Docker bridge network.
+Ollama models are persisted in a Docker volume across restarts.
+
+---
+
 ## 📈 Status
 
-**v0.5.0 (Current)** — Adversarial benchmark + empirical validation:
+**v0.5.0 (Current)** — Full stack: defense + benchmark + containerization:
 
 | Component | Version | Description |
 |---|---|---|
