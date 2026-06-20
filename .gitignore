@@ -1,0 +1,11 @@
+# misdirection-proxy
+*.pyc
+__pycache__/
+.venv/
+.env
+.pytest_cache/
+htmlcov/
+.coverage
+dist/
+build/
+*.egg-info/
