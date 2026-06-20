@@ -126,9 +126,11 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 python -m misdirection.eval.bench --mode deterministic --rounds 20
 
 # Ollama mode (requires Ollama running)
+# Linux/macOS/WSL2:
 OLLAMA_HOST=http://localhost:11434 python -m misdirection.eval.bench --mode ollama --rounds 20
+# Windows PowerShell: $env:OLLAMA_HOST="http://localhost:11434"; python -m misdirection.eval.bench --mode ollama --rounds 20
 
-# Save report
+# Save report (default: eval_report.json in current directory)
 python -m misdirection.eval.bench --output eval_report.json
 ```
 
