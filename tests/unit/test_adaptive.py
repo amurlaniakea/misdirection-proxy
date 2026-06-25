@@ -145,14 +145,18 @@ class TestAttackSimulation:
         store = InMemorySessionStore()
         session_id = "attacker-1"
         gamma_values = []
+        # Use suspicious (0.5 per request) to see gradual escalation curve
+        # before saturation — with omega=0.5, malicious (1.0) saturates in 1 step
         for i in range(10):
-            session = store.record(session_id, "malicious", 0.8, True)
+            session = store.record(session_id, "suspicious", 0.5, False)
             gamma_values.append(session.current_gamma_a)
         # Monotonically non-decreasing
         for i in range(1, len(gamma_values)):
             assert gamma_values[i] >= gamma_values[i - 1]
-        # Final should be at or near max
+        # Final should be strictly greater than initial (escalation happened)
         assert gamma_values[-1] > gamma_values[0]
+        # Should not exceed gamma_max
+        assert gamma_values[-1] <= 0.99
 
     def test_benign_session_stays_at_base(self):
         store = InMemorySessionStore()

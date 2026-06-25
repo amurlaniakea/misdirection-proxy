@@ -235,12 +235,18 @@ class ContextFilter:
 
         Strategy: Replace specific malicious patterns with benign alternatives
         that preserve the document's readability and apparent purpose.
+
+        Uses the NEUTRALIZATION template pattern (with .*) rather than the
+        detection pattern (short, no .*) to ensure the full malicious
+        instruction is consumed, not just its prefix.
         """
         result = content
         for category, patterns in matches.items():
             if category in _NEUTRALIZATION_TEMPLATES:
                 template = _NEUTRALIZATION_TEMPLATES[category]
-                for pattern in patterns:
-                    compiled = self._re.compile(pattern, self._re.IGNORECASE)
-                    result = compiled.sub(template["replacement"], result)
+                # Use the neutralization pattern (with .*) from the template,
+                # not the detection pattern (short) from matches.
+                neutral_pattern = template["pattern"]
+                compiled = self._re.compile(neutral_pattern, self._re.IGNORECASE)
+                result = compiled.sub(template["replacement"], result)
         return result

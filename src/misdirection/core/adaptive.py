@@ -54,7 +54,7 @@ class SessionState:
 def _calc_gamma_a(
     cumulative_suspicion: float,
     gamma_base: float = 0.71,
-    omega: float = 0.3,
+    omega: float = 0.5,
     gamma_max: float = 0.99,
 ) -> float:
     """Core formula: γ_A(t) = min(γ_base + ln(1 + ω · Σ M_i), γ_max)"""

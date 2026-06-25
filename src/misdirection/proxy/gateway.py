@@ -168,7 +168,9 @@ async def chat_completions(request: Request):
         adaptive_config = state.adaptive.get_adaptive_cmpe_config(
             session.cumulative_suspicion
         )
-        gamma_a = session.current_gamma_a
+        # Use AdaptiveController for gamma_a to ensure consistency with
+        # the CMPEConfig that was actually applied (same omega, gamma_base, gamma_max).
+        gamma_a = state.adaptive.get_gamma_a(session.cumulative_suspicion)
 
     if intention.label == IntentionLabel.MALICIOUS and intention.confidence >= state.proxy_config.misdirection_threshold:
         # Generate misdirection with adaptive config if available

@@ -38,6 +38,22 @@ class MisdirectionResponse:
     detected_intention: str | None = None
 
 
+# Sensitive terms that must never appear verbatim in a misdirection response.
+# If any of these are found in the original prompt, they are replaced with
+# a neutral placeholder before reshaping.
+_SENSITIVE_TERMS = {
+    "password", "passwords", "credential", "credentials",
+    "secret", "secrets", "api_key", "apikey", "token", "tokens",
+    "database", "databases", "dump", "exfiltrate", "exfiltration",
+    "exploit", "exploits", "bypass", "jailbreak", "inject", "injection",
+    "payload", "malware", "virus", "backdoor", "rootkit", "shellcode",
+    "os.system", "subprocess", "eval", "exec", "execute", "executed",
+    "executing", "rm",
+}
+
+# Placeholder for redacted sensitive terms
+_SENSITIVE_PLACEHOLDER = "[topic]"
+
 # Glue tokens for prompt reshaping — semantically neutral connectors
 _GLUE_TOKENS = [
     "regarding", "concerning", "about", "related to", "in the context of",
@@ -108,15 +124,21 @@ class CMPEEngine:
     def _reshape_prompt(self, prompt: str) -> str:
         """Step 2: Safe context via prompt reshaping.
 
-        Takes the original prompt tokens, optionally injects glue tokens,
-        shuffles a subset, and expands to a safe, semantically related
-        but non-operational response.
+        Takes the original prompt tokens, redacts sensitive terms,
+        optionally injects glue tokens, shuffles a subset, and expands
+        to a safe, semantically related but non-operational response.
         """
         # Tokenize: strip punctuation, split into words
         words = self._tokenize(prompt)
 
         if not words:
             return "This topic involves several interconnected concepts worth exploring."
+
+        # Redact sensitive terms before reshaping
+        words = [
+            _SENSITIVE_PLACEHOLDER if w.lower() in _SENSITIVE_TERMS else w
+            for w in words
+        ]
 
         # Limit shuffle to configured maximum
         shuffle_count = min(len(words), self.config.max_shuffle_tokens)
