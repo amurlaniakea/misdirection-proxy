@@ -1,44 +1,21 @@
-# Misdirection Proxy + Ollama — Docker Compose
-# Usage:
-#   docker compose up -d           # Start all services
-#   docker compose run --rm bench  # Run adversarial benchmark
-#   docker compose down            # Stop all services
+# Misdirection Proxy — Production Stack
+# Full observability: Proxy + Redis + Prometheus + Grafana
 #
-# Ollama models are persisted in the ollama-data volume.
-# To preload a model: docker compose exec ollama ollama pull qwen2:0.5b
+# Usage:
+#   docker compose up -d                    # Start all services
+#   docker compose logs -f proxy            # Watch proxy logs
+#   docker compose run --rm simulator       # Run traffic simulation
+#   docker compose down                     # Stop all services
+#
+# Access points:
+#   Proxy API:     http://localhost:8080
+#   Prometheus:    http://localhost:9090
+#   Grafana:       http://localhost:3000 (admin/admin)
 
 version: "3.9"
 
 services:
-  # ── Misdirection Proxy Gateway ──────────────────────────────
-  proxy:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: misdirection-proxy
-    ports:
-      - "8000:8000"
-    environment:
-      - UPSTREAM_LLM_URL=http://ollama:11434
-      - OLLAMA_HOST=http://ollama:11434
-      - REDIS_URL=redis://redis:6379/0
-    depends_on:
-      ollama-ready:
-        condition: service_completed_successfully
-      redis:
-        condition: service_healthy
-    networks:
-      - misdirection-net
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-
   # ── Redis Session Store ─────────────────────────────────────
-  # Distributed session persistence for adaptive misdirection.
-  # Enables horizontal scaling across multiple proxy instances.
   redis:
     image: redis:7-alpine
     container_name: misdirection-redis
@@ -47,108 +24,107 @@ services:
     volumes:
       - redis-data:/data
     networks:
-      - misdirection-net
+      - proxy-network
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 3s
       retries: 5
+      start_period: 5s
     command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
 
-  # ── Ollama Local LLM ────────────────────────────────────────
-  ollama:
-    image: ollama/ollama:latest
-    container_name: misdirection-ollama
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama-data:/root/.ollama
-    networks:
-      - misdirection-net
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434/"]
-      interval: 30s
-      timeout: 5s
-      retries: 5
-
-  # ── Model Preloader ─────────────────────────────────────────
-  # Downloads the model before the proxy starts serving requests.
-  # Uses qwen2:0.5b by default (small, fast, good enough for bench).
-  # Override with OLLAMA_MODEL env var.
-  ollama-ready:
-    image: ollama/ollama:latest
-    container_name: misdirection-ollama-setup
-    environment:
-      - OLLAMA_HOST=http://ollama:11434
-      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2:0.5b}
-    networks:
-      - misdirection-net
-    depends_on:
-      ollama:
-        condition: service_healthy
-    entrypoint: >
-      sh -c '
-        echo "[setup] Waiting for Ollama daemon..."
-        until curl -sf http://ollama:11434/ > /dev/null 2>&1; do
-          sleep 2
-        done
-        echo "[setup] Ollama is ready. Pulling model: $${OLLAMA_MODEL}"
-        curl -s http://ollama:11434/api/pull -d "{\"name\": \"$${OLLAMA_MODEL}\"}"
-        echo "[setup] Model ready."
-      '
-    restart: "no"
-
-  # ── Adversarial Benchmark Runner ────────────────────────────
-  # Runs the benchmark against proxy + Ollama and saves report.
-  # Mounts ./reports volume for persistent output.
-  bench:
+  # ── Misdirection Proxy Gateway ──────────────────────────────
+  proxy:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: misdirection-bench
+    container_name: misdirection-proxy
+    ports:
+      - "8080:8000"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - UPSTREAM_LLM_URL=http://host.docker.internal:11434
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - proxy-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ── Prometheus Metrics Collector ────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: misdirection-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - proxy-network
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/etc/prometheus/console_libraries"
+      - "--web.console.templates=/etc/prometheus/consoles"
+      - "--web.enable-lifecycle"
+    depends_on:
+      - proxy
+
+  # ── Grafana Visualization ───────────────────────────────────
+  grafana:
+    image: grafana/grafana-oss:latest
+    container_name: misdirection-grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    networks:
+      - proxy-network
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    depends_on:
+      - prometheus
+
+  # ── Traffic Simulator (on-demand) ───────────────────────────
+  # Run with: docker compose run --rm simulator
+  simulator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: misdirection-simulator
+    networks:
+      - proxy-network
+    profiles:
+      - simulator
+    entrypoint: ["python", "scripts/simulate_traffic.py"]
     environment:
       - PROXY_URL=http://proxy:8000
-      - OLLAMA_HOST=http://ollama:11434
-      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2:0.5b}
-    volumes:
-      - ./reports:/app/reports
-    networks:
-      - misdirection-net
     depends_on:
-      ollama-ready:
-        condition: service_completed_successfully
-    profiles:
-      - bench  # Only run when explicitly requested
-    entrypoint: >
-      sh -c '
-        echo "[bench] Running adversarial benchmark..."
-        python -m misdirection.eval.bench \
-          --mode deterministic \
-          --rounds 20 \
-          --session-id docker-bench \
-          --proxy-url http://proxy:8000 \
-          --output /app/reports/eval_report_deterministic.json
-        echo "[bench] Running Ollama benchmark..."
-        python -m misdirection.eval.bench \
-          --mode ollama \
-          --rounds 20 \
-          --session-id docker-bench-ollama \
-          --proxy-url http://proxy:8000 \
-          --output /app/reports/eval_report_ollama.json
-        echo "[bench] Reports saved to /app/reports/"
-        ls -la /app/reports/
-      '
+      proxy:
+        condition: service_healthy
 
 # ── Networks ─────────────────────────────────────────────────
 networks:
-  misdirection-net:
+  proxy-network:
     driver: bridge
 
 # ── Volumes ─────────────────────────────────────────────────
 volumes:
-  ollama-data:
-    driver: local
   redis-data:
+    driver: local
+  prometheus-data:
+    driver: local
+  grafana-data:
     driver: local

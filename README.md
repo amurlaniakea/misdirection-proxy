@@ -148,44 +148,47 @@ Measures: PPV degradation, γ_A escalation, ASR, latency per request.
 
 ---
 
-## 🐳 Docker Compose (Recommended)
+## 🐳 Docker Compose (Production Stack)
 
-The full stack (Proxy + Ollama + Benchmark) can be deployed with a single command:
+Full observability stack: **Proxy + Redis + Prometheus + Grafana**
 
 ```bash
-# Clone and start
-git clone https://github.com/amurlaniakea/misdirection-proxy.git
-cd misdirection-proxy
-
-# Start proxy + Ollama (downloads qwen2:0.5b by default)
+# Start all services
 docker compose up -d
 
-# Run the adversarial benchmark
-docker compose --profile bench run --rm bench
+# Access points:
+#   Proxy API:     http://localhost:8080
+#   Prometheus:    http://localhost:9090
+#   Grafana:       http://localhost:3000 (admin/admin)
 
-# View reports
-ls reports/
+# Run traffic simulation (populates metrics)
+docker compose --profile simulator run --rm simulator
+
+# View logs
+docker compose logs -f proxy
 
 # Stop everything
 docker compose down
-```
-
-### Custom Model
-
-```bash
-# Use a different model (e.g., llama3:8b)
-OLLAMA_MODEL=llama3:8b docker compose up -d
 ```
 
 ### Architecture
 
 ```
 docker-compose.yml
-├── proxy          → FastAPI gateway (port 8000)
-├── ollama         → Ollama LLM daemon (port 11434)
-├── ollama-ready   → Model preloader (runs once)
-└── bench          → Adversarial benchmark runner (profile: bench)
+├── proxy        → Gunicorn + Uvicorn workers (port 8080)
+├── redis        → Session persistence (port 6379)
+├── prometheus   → Metrics collector (port 9090)
+├── grafana      → Visualization (port 3000)
+└── simulator    → Traffic generator (profile: simulator)
 ```
+
+### Prometheus Metrics
+
+The `/metrics` endpoint exposes:
+- `misdirection_requests_total` — request counter by classification
+- `misdirection_inference_latency_seconds` — ML latency histogram
+- `misdirection_regex_fallbacks_total` — fallback counter
+- `misdirection_triggered_total` — misdirection responses served
 
 All services communicate over an isolated Docker bridge network.
 Ollama models are persisted in a Docker volume across restarts.

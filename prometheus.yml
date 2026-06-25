@@ -1,0 +1,13 @@
+# Prometheus configuration for Misdirection Proxy monitoring
+# Scrapes metrics from the proxy every 5 seconds
+
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: "misdirection-proxy"
+    static_configs:
+      - targets: ["proxy:8080"]
+    metrics_path: "/metrics"
+    scrape_timeout: 3s
