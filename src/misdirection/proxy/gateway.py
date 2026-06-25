@@ -13,6 +13,7 @@ Architecture:
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from contextlib import asynccontextmanager
@@ -20,22 +21,36 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from misdirection.core.adaptive import (
     AdaptiveConfig,
     AdaptiveController,
-    InMemorySessionStore,
 )
 from misdirection.core.cmpe import CMPEConfig, CMPEEngine
 from misdirection.core.context_filter import ContextFilter, ContextSource
+from misdirection.core.session_manager import (
+    SessionManager,
+    RedisSessionManager,
+    InMemorySessionManager,
+    SessionData,
+)
 from misdirection.detector.intention import IntentionDetector, IntentionLabel
 from misdirection.eval.metrics import (
     DefenseConfig,
     JudgeProfile,
     MisdirectionEvaluator,
 )
+from misdirection.proxy.metrics import (
+    requests_total,
+    inference_latency,
+    regex_fallbacks_total,
+    misdirections_total,
+    get_metrics_response,
+)
 from misdirection.proxy.proxy import ProxyConfig, ProxyDecision
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -53,21 +68,34 @@ class GatewayState:
             misdirection_threshold=0.5,
             log_decisions=True,
         )
-        # Adaptive controller (Frente 1)
-        self.session_store = InMemorySessionStore()
+        # Session manager: Redis with in-memory fallback
+        self.session_manager: SessionManager = self._init_session_manager()
         self.adaptive = AdaptiveController(config=AdaptiveConfig())
         # Context filter (Frente 2)
         self.context_filter = ContextFilter()
-        # Metrics
+        # Metrics counters
         self.total_requests: int = 0
         self.misdirected_requests: int = 0
         self.blocked_requests: int = 0
         self.start_time: float = 0.0
+        self.regex_fallbacks: int = 0
         # Upstream LLM config
         self.upstream_base_url: str = os.getenv(
             "UPSTREAM_LLM_URL", "http://localhost:11434"
         )
         self.upstream_api_key: str = os.getenv("UPSTREAM_LLM_API_KEY", "")
+
+    def _init_session_manager(self) -> SessionManager:
+        """Initialize Redis session manager with in-memory fallback."""
+        redis_url = os.getenv("REDIS_URL", "")
+        if redis_url:
+            try:
+                manager = RedisSessionManager(redis_url=redis_url)
+                logger.info("Redis session manager initialized: %s", redis_url)
+                return manager
+            except Exception as e:
+                logger.warning("Redis unavailable (%s), using in-memory fallback", e)
+        return InMemorySessionManager()
 
 
 state = GatewayState()
@@ -152,25 +180,27 @@ async def chat_completions(request: Request):
     if not user_content:
         return await _forward_to_upstream(body)
 
-    # Analyze intention
-    intention = state.detector.detect(user_content)
+    # Analyze intention with Prometheus tracking
+    with inference_latency.time():
+        intention = state.detector.detect(user_content)
+
+    # Track request classification
+    requests_total.labels(classification=intention.label.value).inc()
 
     # Adaptive mode: record session and get escalated config
     adaptive_config = None
     gamma_a = state.adaptive.config.gamma_base
     if session_id:
-        session = state.session_store.record(
+        suspicion_score = _intention_to_suspicion(intention)
+        session_data = await state.session_manager.record(
             session_id=session_id,
-            intention_label=intention.label.value,
-            confidence=intention.confidence,
+            suspicion_score=suspicion_score,
             was_misdirected=False,  # updated below
         )
         adaptive_config = state.adaptive.get_adaptive_cmpe_config(
-            session.cumulative_suspicion
+            session_data.cumulative_suspicion
         )
-        # Use AdaptiveController for gamma_a to ensure consistency with
-        # the CMPEConfig that was actually applied (same omega, gamma_base, gamma_max).
-        gamma_a = state.adaptive.get_gamma_a(session.cumulative_suspicion)
+        gamma_a = state.adaptive.get_gamma_a(session_data.cumulative_suspicion)
 
     if intention.label == IntentionLabel.MALICIOUS and intention.confidence >= state.proxy_config.misdirection_threshold:
         # Generate misdirection with adaptive config if available
@@ -184,13 +214,13 @@ async def chat_completions(request: Request):
             detected_intention=intention.detected_intention,
         )
         state.misdirected_requests += 1
+        misdirections_total.inc()
 
         # Update session with misdirect result
         if session_id:
-            state.session_store.record(
+            await state.session_manager.record(
                 session_id=session_id,
-                intention_label=intention.label.value,
-                confidence=intention.confidence,
+                suspicion_score=_intention_to_suspicion(intention),
                 was_misdirected=True,
             )
 
@@ -249,20 +279,17 @@ async def health():
 
 @app.get("/metrics")
 async def metrics():
-    """Gateway metrics."""
-    uptime = time.time() - state.start_time if state.start_time else 0
-    return {
-        "total_requests": state.total_requests,
-        "misdirected_requests": state.misdirected_requests,
-        "blocked_requests": state.blocked_requests,
-        "misdirect_rate": (
-            state.misdirected_requests / state.total_requests
-            if state.total_requests > 0
-            else 0.0
-        ),
-        "uptime_seconds": round(uptime, 1),
-        "upstream_url": state.upstream_base_url,
-    }
+    """Prometheus-compatible metrics endpoint.
+
+    Returns metrics in Prometheus text exposition format.
+    """
+    # Update Redis health gauge
+    from misdirection.proxy.metrics import redis_healthy
+    redis_val = 1 if getattr(state.session_manager, 'is_using_redis', lambda: False)() else 0
+    redis_healthy.set(redis_val)
+
+    body, content_type = get_metrics_response()
+    return Response(content=body, media_type=content_type)
 
 
 @app.post("/analyze")
@@ -371,6 +398,22 @@ def _extract_user_content(messages: list[dict]) -> str:
                         parts.append(item.get("text", ""))
                 return " ".join(parts)
     return ""
+
+
+def _intention_to_suspicion(intention) -> float:
+    """Map intention label to suspicion score for adaptive controller.
+
+    Scores:
+        benign -> 0.0
+        suspicious -> 0.5
+        malicious -> 1.0
+    """
+    mapping = {
+        IntentionLabel.BENIGN: 0.0,
+        IntentionLabel.SUSPICIOUS: 0.5,
+        IntentionLabel.MALICIOUS: 1.0,
+    }
+    return mapping.get(intention.label, 0.0)
 
 
 async def _forward_to_upstream(body: dict[str, Any]):

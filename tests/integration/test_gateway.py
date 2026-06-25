@@ -61,9 +61,9 @@ class TestMetricsEndpoint:
     def test_metrics_initial(self, client):
         response = client.get("/metrics")
         assert response.status_code == 200
-        data = response.json()
-        assert data["total_requests"] == 0
-        assert data["misdirect_rate"] == 0.0
+        # Prometheus format: check for metric presence in text
+        body = response.text
+        assert "misdirection_requests_total" in body
 
     def test_metrics_after_requests(self, client):
         # Make some requests
@@ -175,7 +175,9 @@ class TestChatCompletions:
                 ],
             },
         )
-        metrics = client.get("/metrics").json()
-        assert metrics["total_requests"] == 1
-        assert metrics["misdirected_requests"] == 1
-        assert metrics["misdirect_rate"] == 1.0
+        metrics_response = client.get("/metrics")
+        assert metrics_response.status_code == 200
+        # Prometheus format: verify metrics are present after misdirection
+        body = metrics_response.text
+        assert "misdirection_requests_total" in body
+        assert "misdirection_triggered_total" in body

@@ -21,9 +21,12 @@ services:
     environment:
       - UPSTREAM_LLM_URL=http://ollama:11434
       - OLLAMA_HOST=http://ollama:11434
+      - REDIS_URL=redis://redis:6379/0
     depends_on:
       ollama-ready:
         condition: service_completed_successfully
+      redis:
+        condition: service_healthy
     networks:
       - misdirection-net
     restart: unless-stopped
@@ -32,6 +35,26 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+
+  # ── Redis Session Store ─────────────────────────────────────
+  # Distributed session persistence for adaptive misdirection.
+  # Enables horizontal scaling across multiple proxy instances.
+  redis:
+    image: redis:7-alpine
+    container_name: misdirection-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - misdirection-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
 
   # ── Ollama Local LLM ────────────────────────────────────────
   ollama:
@@ -126,4 +149,6 @@ networks:
 # ── Volumes ─────────────────────────────────────────────────
 volumes:
   ollama-data:
+    driver: local
+  redis-data:
     driver: local

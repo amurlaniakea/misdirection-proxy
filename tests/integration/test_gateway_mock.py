@@ -17,8 +17,9 @@ def reset_state():
     state.misdirected_requests = 0
     state.blocked_requests = 0
     state.start_time = 0.0
-    # Reset session store for adaptive tests
-    state.session_store = type(state.session_store)()
+    # Reset session manager for adaptive tests
+    from misdirection.core.session_manager import InMemorySessionManager
+    state.session_manager = InMemorySessionManager()
     yield
 
 
