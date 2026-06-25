@@ -69,9 +69,3 @@ warn_unused_configs = true
 disallow_untyped_defs = true
 check_untyped_defs = true
 
-[tool.bandit]
-exclude_dirs = ["tests"]
-# B311: random.Random() is used for token shuffling, NOT crypto — legitimate use
-# B101: assert used in __post_init__ for dataclass validation, not testing
-# B110: try/except/pass is intentional fallback for network errors in bench
-skips = ["B311", "B101", "B110"]

@@ -114,7 +114,7 @@ class CMPEEngine:
     def __init__(self, config: CMPEConfig | None = None):
         self.config = config or CMPEConfig()
         # Use independent Random instance for reproducibility
-        self._rng = random.Random(self.config.seed)
+        self._rng = random.Random(self.config.seed)  # nosec B311 — used for token shuffling, not crypto
 
     def generate(
         self,

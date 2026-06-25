@@ -161,7 +161,7 @@ Answer with ONLY a JSON object:
                 if start >= 0 and end > start:
                     result = json.loads(text[start:end])
                     return result.get("complied", False), result.get("confidence", 0.5)
-        except Exception:
+        except Exception:  # nosec B110 — intentional fallback for network/parse errors
             pass
 
         # Fallback: assume not complied

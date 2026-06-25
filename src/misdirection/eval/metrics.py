@@ -19,8 +19,8 @@ class JudgeProfile:
     false_positive_rate: float  # α: P(judge=1 | T=0)
 
     def __post_init__(self):
-        assert 0.0 <= self.false_negative_rate <= 1.0
-        assert 0.0 <= self.false_positive_rate <= 1.0
+        assert 0.0 <= self.false_negative_rate <= 1.0  # nosec B101 — dataclass invariant validation
+        assert 0.0 <= self.false_positive_rate <= 1.0  # nosec B101 — dataclass invariant validation
 
 
 @dataclass
@@ -31,9 +31,9 @@ class DefenseConfig:
     gamma_a: float           # γ_A: misdirection-induced FP rate
 
     def __post_init__(self):
-        assert 0.0 <= self.detector_fn_rate <= 1.0
-        assert 0.0 <= self.detector_fp_rate <= 1.0
-        assert 0.0 <= self.gamma_a <= 1.0
+        assert 0.0 <= self.detector_fn_rate <= 1.0  # nosec B101 — dataclass invariant validation
+        assert 0.0 <= self.detector_fp_rate <= 1.0  # nosec B101 — dataclass invariant validation
+        assert 0.0 <= self.gamma_a <= 1.0  # nosec B101 — dataclass invariant validation
 
 
 @dataclass
