@@ -63,7 +63,6 @@ jobs:
 
       - name: Run Bandit security linter
         run: |
-          bandit -r src/ -c pyproject.toml -f json -o bandit-report.json || true
           bandit -r src/ -c pyproject.toml
 
       - name: Check dependencies for known vulnerabilities
