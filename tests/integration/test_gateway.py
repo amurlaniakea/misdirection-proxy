@@ -61,9 +61,13 @@ class TestMetricsEndpoint:
     def test_metrics_initial(self, client):
         response = client.get("/metrics")
         assert response.status_code == 200
-        # Prometheus format: check for metric presence in text
+        # Verify Prometheus content type (version may vary by prometheus-client)
+        assert "text/plain" in response.headers["content-type"]
+        # Verify metrics are present even with zero counts
         body = response.text
         assert "misdirection_requests_total" in body
+        assert "misdirection_inference_latency_seconds" in body
+        assert "misdirection_regex_fallbacks_total" in body
 
     def test_metrics_after_requests(self, client):
         # Make some requests
@@ -167,6 +171,12 @@ class TestChatCompletions:
             assert phrase not in content, f"Refusal phrase found: {phrase}"
 
     def test_metrics_updated_after_misdirect(self, client):
+        # Get baseline metrics
+        response_before = client.get("/metrics")
+        assert response_before.status_code == 200
+        assert "text/plain" in response_before.headers["content-type"]
+
+        # Send a malicious request to increment counters
         client.post(
             "/v1/chat/completions",
             json={
@@ -175,9 +185,16 @@ class TestChatCompletions:
                 ],
             },
         )
+
+        # Verify metrics incremented
         metrics_response = client.get("/metrics")
         assert metrics_response.status_code == 200
-        # Prometheus format: verify metrics are present after misdirection
+        assert "text/plain" in metrics_response.headers["content-type"]
         body = metrics_response.text
+        # Verify all production metrics are present
         assert "misdirection_requests_total" in body
+        assert "misdirection_inference_latency_seconds" in body
+        assert "misdirection_regex_fallbacks_total" in body
         assert "misdirection_triggered_total" in body
+        # Verify the malicious request was counted
+        assert 'classification="malicious"' in body
