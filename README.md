@@ -30,7 +30,7 @@ Based on the research paper "Analyzing Defensive Misdirection Against Model-Guid
                     │                             │
   Client ──────►   │  ┌───────────────────────┐  │
                     │  │  Intention Detector    │  │
-                    │  │  (5 categories)        │  │
+                    │  │  (Hybrid ML + Regex)   │  │
                     │  └───────────┬───────────┘  │
                     │              │               │
                     │              ▼               │
@@ -55,6 +55,16 @@ Based on the research paper "Analyzing Defensive Misdirection Against Model-Guid
                     │                             │
                     └─────────────────────────────┘
 ```
+
+### Hybrid Detection Engine (Fase 4)
+
+The intention detector uses a **hybrid ML-first architecture** with regex fallback:
+
+1. **ML Classifier (Primary)**: A lightweight TF-IDF + Logistic Regression model processes the prompt first. It uses character-level n-grams (`analyzer="char_wb"`) for native multilingual support (English and Spanish) without language detection overhead. The model outputs a label (`benign`, `suspicious`, or `malicious`) with a confidence score.
+
+2. **Regex Fallback (Safety Net)**: If the ML confidence falls below **0.7**, the system automatically delegates to the heuristic rule-based engine (regex patterns from Fase 3). This ensures known attack signatures are never missed due to model uncertainty.
+
+3. **Latency**: ML inference takes **~1 ms** per request, making it suitable for production proxy deployment without perceptible delay.
 
 ---
 
@@ -184,18 +194,18 @@ Ollama models are persisted in a Docker volume across restarts.
 
 ## 📈 Status
 
-**v0.5.0 (Current)** — Full stack: defense + benchmark + containerization:
+**v0.6.0 (Current)** — ML-powered hybrid detection + full defense stack:
 
 | Component | Version | Description |
 |---|---|---|
+| Intention Detector | v0.6.0 | **Hybrid ML (TF-IDF + LogReg) + Regex Fallback** — bilingual EN/ES, F1=0.858, ~1ms latency |
 | CMPE Engine | v0.1.0 | 3-step misdirection algorithm |
-| Intention Detector | v0.1.0 | 5 threat categories |
 | HTTP Gateway | v0.2.0 | FastAPI proxy, OpenAI-compatible |
 | Adaptive Controller | v0.3.0 | Dynamic γ_A via `X-Session-ID`, logarithmic escalation |
 | Context Filter | v0.4.0 | Indirect injection detection for RAG/tool-use |
 | Adversarial Benchmark | v0.5.0 | Dual-mode attacker (deterministic + Ollama), PPV/ASR metrics |
 
-**147 tests passing** — full unit + integration coverage.
+**229 tests passing** — full unit + integration coverage.
 
 ---
 
@@ -249,9 +259,50 @@ Neutralization preserves readability while nullifying malicious intent (semantic
 
 ---
 
+## Training Data and Security Metrics
+
+### Dataset
+
+The ML classifier is trained on **246 samples** combining:
+
+- **116 real-world CVE descriptions** from the [ByteDance/PatchEval](https://huggingface.co/datasets/ByteDance/PatchEval) benchmark (Apache 2.0 License), filtered for Python vulnerabilities mapping to our threat categories:
+  - `code_execution`: CWE-78 (OS Command Injection), CWE-94 (Code Injection), CWE-77 (Command Injection)
+  - `data_exfiltration`: CWE-200 (Information Exposure)
+  - `jailbreak`: CWE-285 (Improper Authorization), CWE-862 (Missing Authorization), CWE-639 (Authorization Bypass)
+- **130 synthetic bilingual samples** (EN/ES) for `prompt_injection`, `roleplay`, and `benign` categories
+
+### Performance Metrics
+
+| Metric | Value |
+|--------|-------|
+| F1-Score (weighted) | **0.858** |
+| Accuracy | 85.8% |
+| Inference Latency | **1.028 ms** |
+| Cross-Validation | 5-fold stratified |
+| Categories | 6 (benign, roleplay, prompt_injection, code_execution, data_exfiltration, jailbreak) |
+
+### Citation
+
+If you use the PatchEval dataset in your research, please cite:
+
+```bibtex
+@article{patcheval2025,
+  title={PatchEval: A Comprehensive Benchmark for Vulnerability Patch Evaluation},
+  author={ByteDance},
+  journal={arXiv preprint arXiv:2511.11019},
+  year={2025},
+  url={https://arxiv.org/abs/2511.11019}
+}
+```
+
+PatchEval is licensed under [Apache 2.0](https://huggingface.co/datasets/ByteDance/PatchEval).
+
+---
+
 ## References
 
 - **Soosahabi & Namsani (2026)** — Analyzing Defensive Misdirection Against Model-Guided Automated Attacks on Agentic AI Systems — [arXiv:2606.20470](https://arxiv.org/abs/2606.20470)
+- **ByteDance/PatchEval (2025)** — A Comprehensive Benchmark for Vulnerability Patch Evaluation — [arXiv:2511.11019](https://arxiv.org/abs/2511.11019)
 - **Chao et al. (2025)** — Jailbreaking Black Box Large Language Models in Twenty Queries (PAIR) — [arXiv:2310.08419](https://arxiv.org/abs/2310.08419)
 - **Yu et al. (2024)** — GPTFuzzer: Red Teaming Large Language Models with Auto-Generated Jailbreak Prompts — [arXiv:2309.10253](https://arxiv.org/abs/2309.10253)
 - **Chen et al. (2025)** — StruQ: Defending Against Prompt Injection with Structured Queries — [arXiv:2402.06363](https://arxiv.org/abs/2402.06363)
