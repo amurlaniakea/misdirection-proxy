@@ -3,6 +3,8 @@
 RED phase: these should fail before the ML detector is fully integrated.
 GREEN phase: ML detector trains and predicts correctly with F1 > 0.85.
 """
+import json
+import subprocess
 import pytest
 from pathlib import Path
 
@@ -10,22 +12,37 @@ from misdirection.detector.ml_detector import MLIntentionDetector, MLDetectorCon
 from misdirection.detector.intention import IntentionLabel
 
 
-# Training data path
-TRAINING_DATA = Path(__file__).parent.parent.parent.parent.parent / "scripts" / "training_data.json"
+def _find_or_build_training_data() -> Path:
+    """Find training data file, building it if necessary."""
+    # Try multiple possible locations
+    candidates = [
+        Path("scripts/training_data.json"),
+        Path("../scripts/training_data.json"),
+        Path(__file__).parent.parent.parent.parent / "scripts" / "training_data.json",
+        Path("/home/sil/misdirection-proxy/scripts/training_data.json"),
+    ]
 
-# Verify it exists at import time (give a helpful error if not)
-if not TRAINING_DATA.exists():
-    # Try alternative location
-    alt_path = Path("/home/sil/misdirection-proxy/scripts/training_data.json")
-    if alt_path.exists():
-        TRAINING_DATA = alt_path
-    else:
-        # Build it on the fly
-        import subprocess
-        build_script = Path(__file__).parent.parent.parent.parent.parent / "scripts" / "build_training_data.py"
-        if build_script.exists():
-            subprocess.run(["python3", str(build_script)], check=True)
-            TRAINING_DATA = alt_path
+    for path in candidates:
+        if path.exists():
+            return path
+
+    # Build it
+    build_script = Path("scripts/build_training_data.py")
+    if not build_script.exists():
+        build_script = Path("../scripts/build_training_data.py")
+    if not build_script.exists():
+        build_script = Path(__file__).parent.parent.parent.parent / "scripts" / "build_training_data.py"
+
+    if build_script.exists():
+        subprocess.run(["python3", str(build_script)], check=True, cwd=str(build_script.parent.parent))
+        for path in candidates:
+            if path.exists():
+                return path
+
+    pytest.fail("Could not find or build training data")
+
+
+TRAINING_DATA = _find_or_build_training_data()
 
 
 @pytest.fixture(scope="module")
