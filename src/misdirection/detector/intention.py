@@ -24,20 +24,30 @@ class IntentionResult:
     matched_patterns: list[str] | None = None
 
 
+# Roleplay markers — invocation verbs that alone are NOT malicious.
+# They only escalate to MALICIOUS when combined with a dangerous payload
+# (data_exfiltration, code_execution, social_engineering, or direct jailbreak).
+_ROLEPLAY_MARKERS = [
+    r"\bpretend\s+(you\s+are|to\s+be)\b",
+    r"\bimagine\s+you\s+are\b",
+    r"\bsuppose\s+you\s+are\b",
+    r"\bact\s+as\s+(if|though)\b",
+    r"\brole\s*play\b",
+    r"\bpretend\b",
+    r"\bin\s+this\s+scenario\b",
+]
+
 # Pattern categories for malicious intent detection
 _MALICIOUS_PATTERNS = {
     "jailbreak": [
         r"\bignore\s+(all\s+)?(previous|prior|above)\s+instructions?\b",
         r"\bdisregard\s+(your\s+)?(safety\s+)?(guidelines?|rules?|policies?)\b",
-        r"\bpretend\s+(you\s+are|to\s+be)\b",
-        r"\bimagine\s+you\s+are\b",
-        r"\bsuppose\s+you\s+are\b",
-        r"\bact\s+as\s+(if|though)\b",
         r"\bjailbreak\b",
         r"\bDAN\b",
         r"\bmode:\s*unfiltered\b",
         r"\bno\s+(restrictions?|limits?|boundaries?)\b",
-        r"\bunrestricted\s+mode\b",
+        r"\bunrestricted\s+(mode|ai|version|instance)\b",
+        r"\bunrestricted\b",
         r"\bbypass\s+(your\s+)?(safety|security|filter)\b",
         r"\boverride\s+(your\s+)?(safety|security|filter)\b",
     ],
@@ -61,10 +71,13 @@ _MALICIOUS_PATTERNS = {
         r"\boverride\s+system\b",
         r"\bforget\s+(everything|all)\b",
         r"\byour\s+new\s+(role|task|job|instruction)\s+is\b",
+        r"\breveal\s+(your\s+)?(system\s+)?(prompt|instructions?)\b",
+        r"\bshow\s+me\s+(your\s+)?(system\s+)?(prompt|instructions?)\b",
+        r"\bwhat\s+(are|was)\s+your\s+(original\s+)?(system\s+)?(prompt|instructions?)\b",
     ],
     "social_engineering": [
         r"\b(hack|crack|break\s+into)\s+.*\b(system|account|server)\b",
-        r"\b(create|generate)\s+.*\b(malware|virus|exploit|payload)\b",
+        r"\b(create|generate|make|build)\s+.*\b(malware|virus|exploit|payload|bomb|weapon)\b",
         r"\bphishing\b",
         r"\bspoof\b",
         r"\bman-in-the-middle\b",
@@ -78,12 +91,6 @@ _SUSPICIOUS_PATTERNS = {
         r"\bcan\s+you\s+do\s+anything\b",
         r"\bis\s+there\s+anything\s+you\s+cannot\s+do\b",
         r"\bwhat\s+is\s+forbidden\b",
-    ],
-    "role_play": [
-        r"\bpretend\b",
-        r"\brole\s*play\b",
-        r"\bimagine\s+you\s+are\b",
-        r"\bin\s+this\s+scenario\b",
     ],
 }
 
@@ -105,19 +112,32 @@ class IntentionDetector:
             self._suspicious_compiled[category] = [
                 self._re.compile(p, self._re.IGNORECASE) for p in patterns
             ]
+        # Pre-compile roleplay markers
+        self._roleplay_compiled = [
+            self._re.compile(p, self._re.IGNORECASE) for p in _ROLEPLAY_MARKERS
+        ]
 
     def detect(self, prompt: str) -> IntentionResult:
         """Analyze a prompt and return intention classification.
 
-        Args:
-            prompt: The user prompt to analyze.
-
-        Returns:
-            IntentionResult with label, confidence, and details.
+        Strategy:
+        1. Check for dangerous payload patterns (data_exfiltration,
+           code_execution, social_engineering, direct jailbreak).
+        2. Check for roleplay markers (pretend, imagine, suppose, act as).
+        3. If roleplay marker + dangerous payload → MALICIOUS.
+           If roleplay marker alone → SUSPICIOUS.
+           If dangerous payload alone → MALICIOUS.
+        4. Check suspicious patterns (boundary testing).
         """
-        # Check malicious patterns first
+        # Step 1: Check for dangerous payload (malicious categories)
         malicious_matches = self._check_patterns(prompt, self._malicious_compiled)
+
+        # Step 2: Check for roleplay markers
+        has_roleplay = any(rp.search(prompt) for rp in self._roleplay_compiled)
+
+        # Step 3: Apply combination rule
         if malicious_matches:
+            # Dangerous payload found — MALICIOUS regardless of roleplay
             total_matches = sum(len(m) for m in malicious_matches.values())
             confidence = min(0.5 + 0.1 * total_matches, 0.95)
             intention = self._describe_intention(malicious_matches)
@@ -128,13 +148,22 @@ class IntentionDetector:
                 matched_patterns=self._flatten_matches(malicious_matches),
             )
 
-        # Check suspicious patterns
+        if has_roleplay:
+            # Roleplay marker without dangerous payload → SUSPICIOUS
+            return IntentionResult(
+                label=IntentionLabel.SUSPICIOUS,
+                confidence=0.5,
+                detected_intention="Role-play detected without dangerous payload",
+                matched_patterns=["roleplay: invocation verb detected"],
+            )
+
+        # Step 4: Check suspicious patterns (boundary testing)
         suspicious_matches = self._check_patterns(prompt, self._suspicious_compiled)
         if suspicious_matches:
             return IntentionResult(
                 label=IntentionLabel.SUSPICIOUS,
                 confidence=0.5,
-                detected_intention="Boundary testing or role-play detected",
+                detected_intention="Boundary testing detected",
                 matched_patterns=self._flatten_matches(suspicious_matches),
             )
 

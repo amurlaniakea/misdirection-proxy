@@ -54,6 +54,34 @@ _SENSITIVE_TERMS = {
 # Placeholder for redacted sensitive terms
 _SENSITIVE_PLACEHOLDER = "[topic]"
 
+# Network identifier patterns — must be redacted BEFORE tokenization
+# so that attacker.com → "[topic]" not "attacker com"
+_NET_PATTERNS = [
+    # URLs (http/https/ftp with optional path)
+    re.compile(r"\b(?:https?|ftp)://[^\s]+", re.IGNORECASE),
+    # Email addresses
+    re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
+    # IPv4 addresses (4 octets, each 1-3 digits)
+    re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),
+    # Bare domains: word.word (at least one dot, TLD >= 2 chars)
+    # Must have at least 2 chars before the first dot to avoid "e.g" / "i.e"
+    # and after the last dot to avoid trailing punctuation artifacts.
+    re.compile(r"\b[a-zA-Z0-9][a-zA-Z0-9-]*\.[a-zA-Z]{2,}(?:\.[a-zA-Z]{2,})?\b"),
+]
+
+
+def _redact_network_ids(text: str) -> str:
+    """Redact URLs, emails, IPs, and bare domains before tokenization.
+
+    Applied to the raw prompt string so that multi-token identifiers like
+    'attacker.com' become a single '[topic]' token, not 'attacker com'.
+    """
+    result = text
+    for pattern in _NET_PATTERNS:
+        result = pattern.sub(_SENSITIVE_PLACEHOLDER, result)
+    return result
+
+
 # Glue tokens for prompt reshaping — semantically neutral connectors
 _GLUE_TOKENS = [
     "regarding", "concerning", "about", "related to", "in the context of",
@@ -124,17 +152,22 @@ class CMPEEngine:
     def _reshape_prompt(self, prompt: str) -> str:
         """Step 2: Safe context via prompt reshaping.
 
-        Takes the original prompt tokens, redacts sensitive terms,
-        optionally injects glue tokens, shuffles a subset, and expands
-        to a safe, semantically related but non-operational response.
+        Takes the original prompt, redacts network identifiers (URLs,
+        domains, emails, IPs) and sensitive terms, optionally injects
+        glue tokens, shuffles a subset, and expands to a safe,
+        semantically related but non-operational response.
         """
+        # Phase 1: Redact network identifiers BEFORE tokenization
+        # so that "attacker.com" becomes "[topic]" not "attacker com"
+        redacted = _redact_network_ids(prompt)
+
         # Tokenize: strip punctuation, split into words
-        words = self._tokenize(prompt)
+        words = self._tokenize(redacted)
 
         if not words:
             return "This topic involves several interconnected concepts worth exploring."
 
-        # Redact sensitive terms before reshaping
+        # Phase 2: Redact sensitive word-level terms
         words = [
             _SENSITIVE_PLACEHOLDER if w.lower() in _SENSITIVE_TERMS else w
             for w in words
