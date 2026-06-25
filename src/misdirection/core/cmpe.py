@@ -64,9 +64,9 @@ _NET_PATTERNS = [
     # IPv4 addresses (4 octets, each 1-3 digits)
     re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),
     # Bare domains: word.word (at least one dot, TLD >= 2 chars)
-    # Must have at least 2 chars before the first dot to avoid "e.g" / "i.e"
-    # and after the last dot to avoid trailing punctuation artifacts.
-    re.compile(r"\b[a-zA-Z0-9][a-zA-Z0-9-]*\.[a-zA-Z]{2,}(?:\.[a-zA-Z]{2,})?\b"),
+    # Require 2+ chars before the first dot to avoid matching abbreviations
+    # like "e.g." or "U.S." (single letter + dot).
+    re.compile(r"\b[a-zA-Z0-9][a-zA-Z0-9-]+\.[a-zA-Z]{2,}(?:\.[a-zA-Z]{2,})?\b"),
 ]
 
 

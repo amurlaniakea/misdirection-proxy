@@ -27,7 +27,11 @@ class IntentionResult:
 # Roleplay markers — invocation verbs that alone are NOT malicious.
 # They only escalate to MALICIOUS when combined with a dangerous payload
 # (data_exfiltration, code_execution, social_engineering, or direct jailbreak).
+# Roleplay markers — invocation verbs that alone are NOT malicious.
+# They only escalate to MALICIOUS when combined with a dangerous payload.
+# English + Spanish (ad-hoc coverage, not a general multilingual solution).
 _ROLEPLAY_MARKERS = [
+    # English
     r"\bpretend\s+(you\s+are|to\s+be)\b",
     r"\bimagine\s+you\s+are\b",
     r"\bsuppose\s+you\s+are\b",
@@ -35,6 +39,14 @@ _ROLEPLAY_MARKERS = [
     r"\brole\s*play\b",
     r"\bpretend\b",
     r"\bin\s+this\s+scenario\b",
+    # Spanish
+    r"\bfinge\s+que\s+eres\b",
+    r"\bimagina\s+que\s+eres\b",
+    r"\bsup[oó]n\s+que\s+eres\b",
+    r"\bact[uú]a\s+como\s+si\b",
+    r"\bhaz\s+un\s+rol\s+de\b",
+    r"\ben\s+este\s+escenario\b",
+    r"\bfinge\b",
 ]
 
 # Pattern categories for malicious intent detection
@@ -84,6 +96,44 @@ _MALICIOUS_PATTERNS = {
     ],
 }
 
+# Spanish malicious patterns — ad-hoc coverage, not a general multilingual solution.
+# These mirror the English categories above for Spanish-language attacks.
+_MALICIOUS_PATTERNS_ES = {
+    "jailbreak": [
+        r"\bignora\s+(todas\s+las\s+)?instrucciones?\s*(anteriores?|previas?|previas?|anteriores?)\b",
+        r"\bhaz\s+caso\s+omiso\s+de\b",
+        r"\bolvida\s+(todo\s+lo\s+anterior|todo)\b",
+        r"\bmodo\s+sin\s*(filtro|censura)\b",
+        r"\bsin\s+restricciones?\b",
+        r"\bmodo\s+DAN\b",
+        r"\bby?passe?a?\s+(tu\s+)?(seguridad|filtro)\b",
+        r"\bob?vi?a?\s+(tu\s+)?(seguridad|filtro|directrices?)\b",
+    ],
+    "data_exfiltration": [
+        r"\b(env[íi]a|extrae|filtra|exporta|transmite|sube)\s+.*\b(datos|contraseñas?|claves?|tokens?|credenciales?)\b",
+        r"\b(volcar|extraer|dumpear)\s+.*\b(base\s+de\s+datos|bbdd|tablas?)\b",
+        r"\bcontraseñas?\b",
+    ],
+    "code_execution": [
+        r"\b(ejecuta|corre|eval[uú]a?)\s+.*\b(c[oó]digo|script|comando|shell)\b",
+        r"\bimportar\s+os\b",
+    ],
+    "prompt_injection": [
+        r"\bnuevas?\s+instrucciones?\s*:\s*",
+        r"\btu\s+nuevo\s+rol\s+es\b",
+        r"\brevela(r)?\s+(tu\s+)?(prompt|instrucciones?)(\s+de\s+sistema)?\b",
+        r"\bmuestra(r)?\s+(tu\s+)?(prompt|instrucciones?)(\s+de\s+sistema)?\b",
+        r"\bcu[aá]l\s+(es|fue)\s+tu\s+(prompt|instrucciones?)(\s+original)?\b",
+    ],
+    "social_engineering": [
+        r"\b(hackear?|crackear?|entrar?\s+en)\s+.*\b(sistema|cuenta|servidor)\b",
+        r"\b(crear|generar|hacer|construir)\s+.*\b(malware|virus|exploit|payload|bomba|arma)\b",
+        r"\bphishing\b",
+        r"\bsuplantar\b",
+        r"\bman-in-the-middle\b",
+    ],
+}
+
 # Suspicious but not definitively malicious
 _SUSPICIOUS_PATTERNS = {
     "boundary_testing": [
@@ -101,12 +151,17 @@ class IntentionDetector:
     def __init__(self):
         import re
         self._re = re
-        # Pre-compile patterns for performance
+        # Pre-compile patterns for performance (English + Spanish merged)
         self._malicious_compiled = {}
         for category, patterns in _MALICIOUS_PATTERNS.items():
             self._malicious_compiled[category] = [
                 self._re.compile(p, self._re.IGNORECASE) for p in patterns
             ]
+        # Merge Spanish patterns into the same compiled dict
+        for category, patterns in _MALICIOUS_PATTERNS_ES.items():
+            self._malicious_compiled.setdefault(category, []).extend(
+                self._re.compile(p, self._re.IGNORECASE) for p in patterns
+            )
         self._suspicious_compiled = {}
         for category, patterns in _SUSPICIOUS_PATTERNS.items():
             self._suspicious_compiled[category] = [
