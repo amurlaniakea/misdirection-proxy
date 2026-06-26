@@ -16,13 +16,12 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-import numpy as np
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import cross_val_score
-from sklearn.pipeline import Pipeline
-
 from misdirection.detector.intention import IntentionLabel, IntentionResult
+
+logger = logging.getLogger(__name__)
+
+# Optional ML dependencies — imported lazily in train()/detect()
+# to avoid hard dependency when HYBRID_DETECTOR is not enabled
 
 logger = logging.getLogger(__name__)
 
@@ -73,15 +72,13 @@ class MLIntentionDetector:
         self._label_map: list[str] = []
 
     def train(self, texts: list[str], labels: list[str]) -> dict:
-        """Train the classifier and return cross-validation metrics.
+        """Train the classifier and return cross-validation metrics."""
+        import numpy as np
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.model_selection import cross_val_score
+        from sklearn.pipeline import Pipeline
 
-        Args:
-            texts: List of prompt texts
-            labels: List of category labels
-
-        Returns:
-            Dict with cv_f1_mean, cv_f1_std, n_samples, categories
-        """
         self._label_map = sorted(set(labels))
 
         self.pipeline = Pipeline([
@@ -128,11 +125,9 @@ class MLIntentionDetector:
         return metrics
 
     def predict(self, text: str) -> tuple[str, float]:
-        """Predict label and confidence for a single text.
+        """Predict label and confidence for a single text."""
+        import numpy as np
 
-        Returns:
-            (label, confidence) tuple
-        """
         if not self.is_trained or self.pipeline is None:
             raise RuntimeError("Detector not trained. Call train() first.")
 

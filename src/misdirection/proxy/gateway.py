@@ -63,7 +63,7 @@ from misdirection.core.session_manager import (
     SessionData,
 )
 from misdirection.detector.intention import IntentionDetector, IntentionLabel
-from misdirection.detector.hybrid_detector import HybridDetector, MLDetectorConfig
+# HybridDetector imported lazily in _init_detector() to avoid sklearn dependency
 from misdirection.eval.metrics import (
     DefenseConfig,
     JudgeProfile,
@@ -117,6 +117,7 @@ class GatewayState:
         """Initialize detector: ML hybrid if HYBRID_DETECTOR=1, else regex-only."""
         if os.getenv("HYBRID_DETECTOR", "0") == "1":
             try:
+                from misdirection.detector.hybrid_detector import HybridDetector
                 detector = HybridDetector()
                 logger.info("Hybrid detector initialized (ML + regex fallback)")
                 return detector

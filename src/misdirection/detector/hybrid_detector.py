@@ -12,9 +12,10 @@ import logging
 from pathlib import Path
 
 from misdirection.detector.intention import IntentionDetector, IntentionResult, IntentionLabel
-from misdirection.detector.ml_detector import MLIntentionDetector, MLDetectorConfig
 
 logger = logging.getLogger(__name__)
+
+# ML detector imported lazily to avoid hard dependency on sklearn/numpy
 
 
 class HybridDetector:
@@ -29,10 +30,11 @@ class HybridDetector:
 
     def __init__(
         self,
-        ml_detector: MLIntentionDetector | None = None,
+        ml_detector=None,
         regex_detector: IntentionDetector | None = None,
-        config: MLDetectorConfig | None = None,
+        config=None,
     ):
+        from misdirection.detector.ml_detector import MLIntentionDetector, MLDetectorConfig
         self.config = config or MLDetectorConfig()
         self.ml = ml_detector
         self.regex = regex_detector or IntentionDetector()
