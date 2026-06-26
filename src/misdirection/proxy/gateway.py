@@ -292,10 +292,9 @@ async def metrics():
 
     # Trigger periodic retry if in fallback (FIX #12)
     # Each Prometheus scrape (15-30s) acts as the retry trigger
-    try:
-        await state.session_manager.health_check()  # nosec B110 — non-fatal, triggers retry
-    except Exception:
-        pass  # health_check failures are non-fatal for metrics endpoint
+    from contextlib import suppress
+    with suppress(Exception):
+        await state.session_manager.health_check()  # health_check failures are non-fatal for metrics endpoint
 
     body, content_type = get_metrics_response()
     return Response(content=body, media_type=content_type)
