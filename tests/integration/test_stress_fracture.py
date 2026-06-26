@@ -152,13 +152,14 @@ async def test_stress_fracture_1500_mixed():
 
 
 @pytest.mark.asyncio
-async def test_redis_lua_script_stability():
+async def test_redis_lua_script_stability(monkeypatch):
     """Validate Redis Lua script atomicity under extreme concurrent writes.
 
     Sends 500 concurrent rate limit checks to verify no race conditions.
     Uses explicit max_connections pool to avoid connection exhaustion.
     """
-    os.environ["REDIS_URL"] = os.getenv("REDIS_URL", "redis://localhost:6379")
+    # Ensure clean REDIS_URL (don't inherit contaminated value from other tests)
+    monkeypatch.setenv("REDIS_URL", os.getenv("REDIS_URL", "redis://localhost:6379"))
 
     try:
         import redis.asyncio as aioredis

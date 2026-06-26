@@ -8,11 +8,9 @@ sys.path.insert(0, "/home/sil/misdirection-proxy/src")
 
 
 @pytest.fixture(autouse=True)
-def auth_env():
+def auth_env(monkeypatch):
     """Set GATEWAY_API_KEY for all tests in this module."""
-    os.environ["GATEWAY_API_KEY"] = "test-secret-xyz"
-    yield
-    os.environ.pop("GATEWAY_API_KEY", None)
+    monkeypatch.setenv("GATEWAY_API_KEY", "test-secret-xyz")
 
 
 def test_chat_completions_requires_auth():
