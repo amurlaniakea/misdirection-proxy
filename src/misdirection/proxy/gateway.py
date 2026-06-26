@@ -283,10 +283,19 @@ async def metrics():
 
     Returns metrics in Prometheus text exposition format.
     """
-    # Update Redis health gauge
+    # Update Redis health gauge and trigger retry (FIX #11 + #12)
     from misdirection.proxy.metrics import redis_healthy
-    redis_val = 1 if getattr(state.session_manager, 'is_using_redis', lambda: False)() else 0
+
+    # is_using_redis is a property (bool), not a method — don't call it
+    redis_val = 1 if getattr(state.session_manager, 'is_using_redis', False) else 0
     redis_healthy.set(redis_val)
+
+    # Trigger periodic retry if in fallback (FIX #12)
+    # Each Prometheus scrape (15-30s) acts as the retry trigger
+    try:
+        await state.session_manager.health_check()
+    except Exception:
+        pass  # health_check failures are non-fatal for metrics endpoint
 
     body, content_type = get_metrics_response()
     return Response(content=body, media_type=content_type)
