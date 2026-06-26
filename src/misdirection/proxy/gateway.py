@@ -77,7 +77,11 @@ from misdirection.proxy.metrics import (
     misdirections_total,
     get_metrics_response,
 )
-from misdirection.proxy.rate_limiter import InMemoryRateLimiter, RateLimiter
+from misdirection.proxy.rate_limiter import (
+    InMemoryRateLimiter,
+    RedisSlidingWindowRateLimiter,
+    RateLimiter,
+)
 from misdirection.proxy.circuit_breaker import CircuitBreaker, CircuitBreakerOpen
 from misdirection.proxy.proxy import ProxyConfig, ProxyDecision
 
@@ -104,8 +108,8 @@ class GatewayState:
         self.adaptive = AdaptiveController(config=AdaptiveConfig())
         # Context filter (Frente 2)
         self.context_filter = ContextFilter()
-        # Rate limiter (anti-abuse)
-        self.rate_limiter: RateLimiter = InMemoryRateLimiter()
+        # Rate limiter (anti-abuse): Redis sliding window with in-memory fallback
+        self.rate_limiter: RateLimiter = self._init_rate_limiter()
         # Circuit breaker (upstream protection)
         self.circuit_breaker = CircuitBreaker(
             failure_threshold=int(os.getenv("CIRCUIT_FAILURE_THRESHOLD", "3")),
@@ -124,6 +128,24 @@ class GatewayState:
             "UPSTREAM_LLM_URL", "http://localhost:11434"
         )
         self.upstream_api_key: str = os.getenv("UPSTREAM_LLM_API_KEY", "")
+
+    def _init_rate_limiter(self) -> RateLimiter:
+        """Initialize rate limiter: Redis sliding window if REDIS_URL is set, else in-memory."""
+        redis_url = os.getenv("REDIS_URL", "")
+        if redis_url:
+            try:
+                import redis.asyncio as aioredis
+                r = aioredis.from_url(
+                    redis_url,
+                    socket_connect_timeout=1.0,
+                    decode_responses=True,
+                )
+                limiter = RedisSlidingWindowRateLimiter(redis=r)
+                logger.info("Redis sliding window rate limiter initialized")
+                return limiter
+            except Exception as e:
+                logger.warning("Redis rate limiter failed (%s), using in-memory fallback", e)
+        return InMemoryRateLimiter()
 
     def _init_detector(self):
         """Initialize detector: ML hybrid if HYBRID_DETECTOR=1, else regex-only."""
@@ -199,7 +221,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Misdirection Gateway",
     description="Defensive Misdirection Proxy for AI Agents",
-    version="0.6.0",
+    version="0.8.0",
     lifespan=lifespan,
 )
 
