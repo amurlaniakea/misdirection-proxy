@@ -77,6 +77,8 @@ from misdirection.proxy.metrics import (
     misdirections_total,
     get_metrics_response,
 )
+from misdirection.proxy.rate_limiter import InMemoryRateLimiter, RateLimiter
+from misdirection.proxy.circuit_breaker import CircuitBreaker, CircuitBreakerOpen
 from misdirection.proxy.proxy import ProxyConfig, ProxyDecision
 
 logger = logging.getLogger(__name__)
@@ -102,6 +104,15 @@ class GatewayState:
         self.adaptive = AdaptiveController(config=AdaptiveConfig())
         # Context filter (Frente 2)
         self.context_filter = ContextFilter()
+        # Rate limiter (anti-abuse)
+        self.rate_limiter: RateLimiter = InMemoryRateLimiter()
+        # Circuit breaker (upstream protection)
+        self.circuit_breaker = CircuitBreaker(
+            failure_threshold=int(os.getenv("CIRCUIT_FAILURE_THRESHOLD", "3")),
+            recovery_timeout=float(os.getenv("CIRCUIT_RECOVERY_TIMEOUT", "30")),
+        )
+        # Rate limit config
+        self.rate_limit = int(os.getenv("RATE_LIMIT_PER_MINUTE", "100"))
         # Metrics counters
         self.total_requests: int = 0
         self.misdirected_requests: int = 0
@@ -235,6 +246,35 @@ async def limit_payload_size(request, call_next):
         async def receive():
             return {"type": "http.request", "body": body}
         request = StarletteRequest(request.scope, receive)
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def rate_limit(request, call_next):
+    """Rate limiting per client IP or API key (sliding window)."""
+    # Skip rate limiting for health checks
+    if request.url.path == "/health":
+        return await call_next(request)
+
+    # Identify client: prefer API key header, fallback to IP
+    client_key = request.headers.get("Authorization", "").replace("Bearer ", "")
+    if not client_key:
+        client_key = request.client.host if request.client else "unknown"
+
+    allowed = await state.rate_limiter.is_allowed(
+        client_key, state.rate_limit, 60
+    )
+    if not allowed:
+        return JSONResponse(
+            status_code=429,
+            content={
+                "error": "Too Many Requests",
+                "limit": state.rate_limit,
+                "window": "60s",
+                "retry_after": 60,
+            },
+            headers={"Retry-After": "60"},
+        )
     return await call_next(request)
 
 
@@ -544,14 +584,14 @@ def _intention_to_suspicion(intention) -> float:
 
 
 async def _forward_to_upstream(body: dict[str, Any]):
-    """Forward the request to the upstream LLM provider."""
+    """Forward the request to the upstream LLM provider with circuit breaker."""
     headers = {
         "Content-Type": "application/json",
     }
     if state.upstream_api_key:
         headers["Authorization"] = f"Bearer {state.upstream_api_key}"
 
-    try:
+    async def _do_forward():
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
                 f"{state.upstream_base_url}/v1/chat/completions",
@@ -562,6 +602,11 @@ async def _forward_to_upstream(body: dict[str, Any]):
                 content=response.json(),
                 status_code=response.status_code,
             )
+
+    try:
+        return await state.circuit_breaker.call(_do_forward)
+    except CircuitBreakerOpen as e:
+        raise HTTPException(status_code=503, detail=str(e))
     except httpx.ConnectError:
         raise HTTPException(
             status_code=502,
