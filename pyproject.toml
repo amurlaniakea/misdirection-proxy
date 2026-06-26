@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "misdirection-proxy"
-version = "0.5.0"
+version = "1.0.0"
 description = "Defensive Misdirection Proxy for AI Agents — CMPE implementation"
 readme = "README.md"
 license = {text = "AGPL-3.0-or-later"}

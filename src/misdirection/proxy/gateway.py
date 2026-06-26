@@ -14,10 +14,12 @@ Architecture:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import re
 import time
+import uuid
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -260,7 +262,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Misdirection Gateway",
     description="Defensive Misdirection Proxy for AI Agents",
-    version="0.8.0",
+    version="1.0.0",
     lifespan=lifespan,
 )
 
@@ -307,6 +309,43 @@ def _redact_secrets(text: str) -> str:
     )
 
     return text
+
+
+# ---------------------------------------------------------------------------
+# Global Exception Handler (Anti-Disclosure)
+# ---------------------------------------------------------------------------
+
+
+def _generate_error_id() -> str:
+    """Generate unique error tracking ID for incident correlation."""
+    return hashlib.sha256(uuid.uuid4().bytes).hexdigest()[:12]
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Catch-all exception handler — never exposes internal details.
+
+    Logs full error with tracking ID for internal debugging.
+    Returns clean HTTP 500 with tracking ID for client.
+    """
+    error_id = _generate_error_id()
+    logger.error(
+        "Unhandled exception [%s]: %s %s — %s: %s",
+        error_id,
+        request.method,
+        request.url.path,
+        type(exc).__name__,
+        str(exc),
+        exc_info=True,  # Full traceback in logs only
+    )
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "Internal Server Error",
+            "tracking_id": error_id,
+            "message": "An unexpected error occurred. Contact support with the tracking ID.",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
