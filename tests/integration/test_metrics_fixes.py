@@ -15,13 +15,24 @@ from misdirection.core.session_manager import HybridSessionManager
 @pytest.fixture(autouse=True)
 def reset_state():
     """Reset gateway state before each test."""
-    state.total_requests = 0
-    state.misdirected_requests = 0
-    state.blocked_requests = 0
-    state.regex_fallbacks = 0
-    # Reset session manager to a fresh HybridSessionManager
-    state.session_manager = HybridSessionManager()
+    import importlib
+    from misdirection.proxy import gateway
+    importlib.reload(gateway)
+    gateway.state.total_requests = 0
+    gateway.state.misdirected_requests = 0
+    gateway.state.blocked_requests = 0
+    gateway.state.regex_fallbacks = 0
+    # Reset session manager to a fresh HybridSessionManager (optimistic default)
+    gateway.state.session_manager = HybridSessionManager(redis_url="redis://localhost:6379")
+    gateway.state.session_manager._using_fallback = False
+    # Update module-level reference used by test methods
+    global state
+    state = gateway.state
     yield
+
+
+# Module-level reference, updated by reset_state fixture
+from misdirection.proxy.gateway import state
 
 
 @pytest.fixture
@@ -49,11 +60,18 @@ class TestFIX11_MetricsNoCrash:
         assert "misdirection_redis_healthy 0.0" in response.text
 
     def test_metrics_redis_healthy_one_when_using_redis(self, client):
-        """redis_healthy gauge must be 1 when Redis is active."""
-        # Default state is using Redis (not in fallback)
-        response = client.get("/metrics")
-        assert response.status_code == 200
-        assert "misdirection_redis_healthy 1.0" in response.text
+        """redis_healthy gauge must be 1 when Redis is active (mocked)."""
+        # Mock health_check to simulate healthy Redis
+        with patch(
+            "misdirection.core.session_manager.RedisSessionManager.health_check",
+            new_callable=AsyncMock,
+            return_value=True,
+        ):
+            # Ensure not in fallback
+            state.session_manager._using_fallback = False
+            response = client.get("/metrics")
+            assert response.status_code == 200
+            assert "misdirection_redis_healthy 1.0" in response.text
 
 
 class TestFIX12_RetryTrigger:

@@ -169,8 +169,8 @@ class RedisSessionManager(SessionManager):
                     parsed[k] = v
             return SessionData.from_dict(parsed)
         except Exception as e:
-            logger.debug("Redis get failed for %s: %s", session_id, e)
-            return None
+            logger.warning("Redis get failed for %s: %s", session_id, e)
+            raise  # Let HybridSessionManager handle fallback (FIX #13)
 
     async def save(self, session_id: str, data: SessionData) -> None:
         try:
@@ -278,7 +278,12 @@ class HybridSessionManager(SessionManager):
 
     async def health_check(self) -> bool:
         if not self._using_fallback:
-            return await self._redis_manager.health_check()
+            redis_ok = await self._redis_manager.health_check()
+            if not redis_ok:
+                self._using_fallback = True
+                logger.warning("Redis health check failed, switching to in-memory fallback")
+                return True  # In-memory fallback is always "healthy"
+            return True
         # Periodic retry to recover Redis (FIX #9)
         now = time.time()
         if now - self._last_retry >= RETRY_INTERVAL:

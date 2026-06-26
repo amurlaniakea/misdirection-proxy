@@ -31,6 +31,7 @@ from misdirection.core.cmpe import CMPEConfig, CMPEEngine
 from misdirection.core.context_filter import ContextFilter, ContextSource
 from misdirection.core.session_manager import (
     SessionManager,
+    HybridSessionManager,
     RedisSessionManager,
     InMemorySessionManager,
     SessionData,
@@ -86,15 +87,15 @@ class GatewayState:
         self.upstream_api_key: str = os.getenv("UPSTREAM_LLM_API_KEY", "")
 
     def _init_session_manager(self) -> SessionManager:
-        """Initialize Redis session manager with in-memory fallback."""
+        """Initialize session manager: Hybrid (Redis + in-memory fallback) if REDIS_URL is set."""
         redis_url = os.getenv("REDIS_URL", "")
         if redis_url:
             try:
-                manager = RedisSessionManager(redis_url=redis_url)
-                logger.info("Redis session manager initialized: %s", redis_url)
+                manager = HybridSessionManager(redis_url=redis_url)
+                logger.info("Hybrid session manager initialized (Redis primary, in-memory fallback): %s", redis_url)
                 return manager
             except Exception as e:
-                logger.warning("Redis unavailable (%s), using in-memory fallback", e)
+                logger.warning("Failed to initialize Hybrid session manager (%s), using in-memory only", e)
         return InMemorySessionManager()
 
 
