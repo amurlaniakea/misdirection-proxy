@@ -88,27 +88,39 @@ class RedisSlidingWindowRateLimiter(RateLimiter):
         redis_key = f"{self._prefix}{key}"
 
         try:
-            pipe = redis.pipeline()
-            # Remove entries outside the window
-            pipe.zremrangebyscore(redis_key, 0, window_start)
-            # Count current entries
-            pipe.zcard(redis_key)
-            results = await pipe.execute()
-            current_count = results[1]
+            # Use Lua script for atomic check-and-add
+            lua_script = """
+            local key = KEYS[1]
+            local now = tonumber(ARGV[1])
+            local window_start = tonumber(ARGV[2])
+            local limit = tonumber(ARGV[3])
+            local member = ARGV[4]
+            local ttl = tonumber(ARGV[5])
 
-            if current_count >= limit:
+            redis.call('ZREMRANGEBYSCORE', key, 0, window_start)
+            local count = redis.call('ZCARD', key)
+
+            if count >= limit then
+                return 0
+            end
+
+            redis.call('ZADD', key, now, member)
+            redis.call('EXPIRE', key, ttl)
+            return 1
+            """
+
+            member = f"{now}:{uuid.uuid4().hex[:8]}"
+            ttl = int(window) + 1
+            result = await redis.eval(
+                lua_script, 1, redis_key, now, window_start, limit, member, ttl
+            )
+
+            if result == 0:
                 logger.warning(
-                    "Rate limit exceeded: key=%s, count=%d, limit=%d, window=%ds",
-                    key, current_count, limit, window,
+                    "Rate limit exceeded: key=%s, limit=%d, window=%ds",
+                    key, limit, window,
                 )
                 return False
-
-            # Add current request
-            member = f"{now}:{uuid.uuid4().hex[:8]}"
-            pipe2 = redis.pipeline()
-            pipe2.zadd(redis_key, {member: now})
-            pipe2.expire(redis_key, window + 1)
-            await pipe2.execute()
             return True
         except Exception as e:
             logger.warning("Rate limiter Redis error (%s), using fallback", e)

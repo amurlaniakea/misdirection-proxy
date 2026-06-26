@@ -192,29 +192,34 @@ class RedisSessionManager(SessionManager):
         was_misdirected: bool,
     ) -> SessionData:
         """Atomic read-modify-write with Redis."""
-        try:
-            r = await self._get_redis()
-            key = self._key(session_id)
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                r = await self._get_redis()
+                key = self._key(session_id)
 
-            async with r.pipeline() as pipe:
-                await pipe.watch(key)
-                existing = await pipe.hgetall(key)
+                async with r.pipeline() as pipe:
+                    await pipe.watch(key)
+                    existing = await pipe.hgetall(key)
 
-                if existing:
-                    data = SessionData.from_dict({k: float(v) for k, v in existing.items()})
-                else:
-                    data = SessionData()
+                    if existing:
+                        data = SessionData.from_dict({k: float(v) for k, v in existing.items()})
+                    else:
+                        data = SessionData()
 
-                data.record_request(suspicion_score, was_misdirected)
+                    data.record_request(suspicion_score, was_misdirected)
 
-                pipe.multi()
-                await pipe.hset(key, mapping={k: str(v) for k, v in data.to_dict().items()})
-                await pipe.expire(key, SESSION_TTL)
-                await pipe.execute()
-                return data
-        except Exception as e:
-            logger.warning("Redis record failed for %s: %s", session_id, e)
-            raise  # Let HybridSessionManager handle fallback (FIX #8)
+                    pipe.multi()
+                    await pipe.hset(key, mapping={k: str(v) for k, v in data.to_dict().items()})
+                    await pipe.expire(key, SESSION_TTL)
+                    await pipe.execute()
+                    return data
+            except Exception as e:
+                if "WatchError" in type(e).__name__ and attempt < max_retries - 1:
+                    logger.debug("Watch conflict on %s, retry %d", session_id, attempt + 1)
+                    continue
+                logger.warning("Redis record failed for %s: %s", session_id, e)
+                raise  # Let HybridSessionManager handle fallback (FIX #8)
 
     async def health_check(self) -> bool:
         try:
