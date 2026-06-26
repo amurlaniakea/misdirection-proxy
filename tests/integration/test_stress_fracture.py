@@ -156,12 +156,18 @@ async def test_redis_lua_script_stability():
     """Validate Redis Lua script atomicity under extreme concurrent writes.
 
     Sends 500 concurrent rate limit checks to verify no race conditions.
+    Uses explicit max_connections pool to avoid connection exhaustion.
     """
     os.environ["REDIS_URL"] = os.getenv("REDIS_URL", "redis://localhost:6379")
 
     try:
         import redis.asyncio as aioredis
-        r = aioredis.from_url(os.environ["REDIS_URL"], decode_responses=True)
+        # Explicit pool size: num_ops + 50 margin for concurrent coroutines
+        r = aioredis.from_url(
+            os.environ["REDIS_URL"],
+            decode_responses=True,
+            max_connections=600,
+        )
         await r.ping()
     except Exception:
         pytest.skip("Redis not available for Lua stability test")
@@ -211,9 +217,9 @@ async def test_redis_lua_script_stability():
         print(f"{'='*60}\n")
 
         # Lua script guarantees atomicity: exactly 200 allowed, 300 denied
-        assert allowed <= limit, f"Allowed {allowed} exceeds limit {limit}"
+        assert allowed == limit, f"Allowed {allowed} != limit {limit}"
         assert allowed + denied == num_ops
 
     finally:
         await r.delete("misdirection:ratelimit:lua-stress")
-        await r.close()
+        await r.aclose()

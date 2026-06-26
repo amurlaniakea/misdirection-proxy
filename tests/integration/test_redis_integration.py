@@ -20,13 +20,13 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 async def redis_conn():
     """Create a real Redis connection for testing."""
     import redis.asyncio as aioredis
-    r = aioredis.from_url(REDIS_URL, decode_responses=True)
+    r = aioredis.from_url(REDIS_URL, decode_responses=True, max_connections=100)
     try:
         await r.ping()
     except Exception:
         pytest.skip(f"Redis not available at {REDIS_URL}")
     yield r
-    await r.close()
+    await r.aclose()
 
 
 @pytest.fixture(autouse=True)
