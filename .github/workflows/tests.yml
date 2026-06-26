@@ -35,4 +35,5 @@ jobs:
           pip install -e ".[dev,ml]"
       - name: Run tests
         env:
-          REDIS_URL: redis://localhost:***@v4
+          REDIS_URL: redis://localhost:6379
+        run: python -m pytest tests/ -v --tb=short
