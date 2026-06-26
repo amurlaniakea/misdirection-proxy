@@ -1,4 +1,13 @@
-"""Session Manager with Redis persistence and in-memory fallback."""
+"""Session Manager with Redis persistence and in-memory fallback.
+
+Provides distributed session storage for adaptive misdirection scaling.
+Supports horizontal scaling across multiple proxy instances behind a load balancer.
+
+Architecture:
+    - RedisSessionManager: Primary, uses redis.asyncio with connection pool
+    - InMemorySessionManager: Fallback when Redis is unavailable
+    - HybridSessionManager: Automatic failover with periodic retry
+"""
 
 from __future__ import annotations
 
@@ -9,13 +18,15 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# Redis key prefix for session data
 SESSION_PREFIX = "misdirection:session:"
-SESSION_TTL = 86400  # 24 hours
+SESSION_TTL = 86400  # 24 hours in seconds
 REDIS_CONNECT_TIMEOUT = 1.0  # aggressive timeout for production failover
+RETRY_INTERVAL = 30.0  # seconds between Redis retry attempts when in fallback mode
 
 
 class SessionData:
-    """Accumulated session state for adaptive misdirection."""
+    """Represents accumulated session state for adaptive misdirection."""
 
     def __init__(
         self,
@@ -47,6 +58,7 @@ class SessionData:
         return cls(**filtered)
 
     def record_request(self, suspicion_score: float, was_misdirected: bool) -> None:
+        """Update session state with a new request."""
         self.cumulative_suspicion += suspicion_score
         self.total_count += 1
         if was_misdirected:
@@ -64,14 +76,16 @@ class SessionManager(ABC):
     async def save(self, session_id: str, data: SessionData) -> None: ...
 
     @abstractmethod
-    async def record(self, session_id: str, suspicion_score: float, was_misdirected: bool) -> SessionData: ...
+    async def record(
+        self, session_id: str, suspicion_score: float, was_misdirected: bool
+    ) -> SessionData: ...
 
     @abstractmethod
     async def health_check(self) -> bool: ...
 
 
 class InMemorySessionManager(SessionManager):
-    """Fallback session manager using local memory."""
+    """Fallback session manager using local memory (non-distributed)."""
 
     def __init__(self):
         self._sessions: dict[str, SessionData] = {}
@@ -82,7 +96,12 @@ class InMemorySessionManager(SessionManager):
     async def save(self, session_id: str, data: SessionData) -> None:
         self._sessions[session_id] = data
 
-    async def record(self, session_id: str, suspicion_score: float, was_misdirected: bool) -> SessionData:
+    async def record(
+        self,
+        session_id: str,
+        suspicion_score: float,
+        was_misdirected: bool,
+    ) -> SessionData:
         session = self._sessions.get(session_id) or SessionData()
         session.record_request(suspicion_score, was_misdirected)
         self._sessions[session_id] = session
@@ -93,26 +112,43 @@ class InMemorySessionManager(SessionManager):
 
 
 class RedisSessionManager(SessionManager):
-    """Production session manager using Redis with async I/O."""
+    """Production session manager using Redis with async I/O.
 
-    def __init__(self, redis_url: str = "redis://localhost:6379", connect_timeout: float = REDIS_CONNECT_TIMEOUT):
+    Uses Redis Hashes for granular field access and EXPIRE for TTL renewal.
+    Connection pool with aggressive timeout for fast failover.
+    """
+
+    def __init__(
+        self, redis_url: str = "redis://localhost:6379", connect_timeout: float = REDIS_CONNECT_TIMEOUT
+    ):
         self._redis_url = redis_url
         self._connect_timeout = connect_timeout
         self._redis = None
         self._available = False
 
     async def _get_redis(self):
+        """Lazy connection with timeout."""
         if self._redis is not None:
             return self._redis
-        import redis.asyncio as aioredis
-        self._redis = aioredis.from_url(
-            self._redis_url,
-            socket_connect_timeout=self._connect_timeout,
-            socket_timeout=self._connect_timeout,
-            decode_responses=True,
-        )
-        await self._redis.ping()
-        self._available = True
+
+        try:
+            import redis.asyncio as aioredis
+
+            self._redis = aioredis.from_url(
+                self._redis_url,
+                socket_connect_timeout=self._connect_timeout,
+                socket_timeout=self._connect_timeout,
+                decode_responses=True,
+            )
+            # Test connection
+            await self._redis.ping()
+            self._available = True
+            logger.info("Redis session manager connected to %s", self._redis_url)
+        except Exception as e:
+            logger.warning("Redis connection failed (%s), will retry on next call", e)
+            self._available = False
+            raise
+
         return self._redis
 
     def _key(self, session_id: str) -> str:
@@ -124,49 +160,61 @@ class RedisSessionManager(SessionManager):
             data = await r.hgetall(self._key(session_id))
             if not data:
                 return None
+            # Convert string values to float/int
             parsed = {}
             for k, v in data.items():
                 try:
-                    parsed[k] = float(v)
+                    parsed[k] = float(v) if "." in v else int(v)
                 except (ValueError, TypeError):
                     parsed[k] = v
             return SessionData.from_dict(parsed)
         except Exception as e:
-            logger.debug("Redis get failed: %s", e)
+            logger.debug("Redis get failed for %s: %s", session_id, e)
             return None
 
     async def save(self, session_id: str, data: SessionData) -> None:
         try:
             r = await self._get_redis()
             key = self._key(session_id)
+            # Use pipeline for atomic HSET + EXPIRE
             async with r.pipeline() as pipe:
                 await pipe.hset(key, mapping={k: str(v) for k, v in data.to_dict().items()})
                 await pipe.expire(key, SESSION_TTL)
                 await pipe.execute()
         except Exception as e:
-            logger.warning("Redis save failed: %s", e)
+            logger.warning("Redis save failed for %s: %s", session_id, e)
+            raise  # Let HybridSessionManager handle fallback
 
-    async def record(self, session_id: str, suspicion_score: float, was_misdirected: bool) -> SessionData:
+    async def record(
+        self,
+        session_id: str,
+        suspicion_score: float,
+        was_misdirected: bool,
+    ) -> SessionData:
+        """Atomic read-modify-write with Redis."""
         try:
             r = await self._get_redis()
             key = self._key(session_id)
+
             async with r.pipeline() as pipe:
                 await pipe.watch(key)
                 existing = await pipe.hgetall(key)
+
                 if existing:
                     data = SessionData.from_dict({k: float(v) for k, v in existing.items()})
                 else:
                     data = SessionData()
+
                 data.record_request(suspicion_score, was_misdirected)
+
                 pipe.multi()
                 await pipe.hset(key, mapping={k: str(v) for k, v in data.to_dict().items()})
                 await pipe.expire(key, SESSION_TTL)
                 await pipe.execute()
                 return data
         except Exception as e:
-            logger.warning("Redis record failed: %s, using in-memory", e)
-            fallback = InMemorySessionManager()
-            return await fallback.record(session_id, suspicion_score, was_misdirected)
+            logger.warning("Redis record failed for %s: %s", session_id, e)
+            raise  # Let HybridSessionManager handle fallback (FIX #8)
 
     async def health_check(self) -> bool:
         try:
@@ -178,12 +226,19 @@ class RedisSessionManager(SessionManager):
 
 
 class HybridSessionManager(SessionManager):
-    """Primary Redis with automatic failover to in-memory."""
+    """Primary Redis with automatic failover to in-memory.
+
+    Features:
+    - Automatic failover when Redis is unavailable
+    - Periodic retry to recover Redis connection (FIX #9)
+    - Persistent fallback session storage (FIX #8)
+    """
 
     def __init__(self, redis_url: str = "redis://localhost:6379"):
         self._redis_manager = RedisSessionManager(redis_url)
-        self._fallback = InMemorySessionManager()
+        self._fallback = InMemorySessionManager()  # Persistent fallback (FIX #8)
         self._using_fallback = False
+        self._last_retry = 0.0
 
     async def get(self, session_id: str) -> SessionData | None:
         if not self._using_fallback:
@@ -206,19 +261,34 @@ class HybridSessionManager(SessionManager):
                 logger.warning("Redis unavailable, switching to in-memory fallback")
         await self._fallback.save(session_id, data)
 
-    async def record(self, session_id: str, suspicion_score: float, was_misdirected: bool) -> SessionData:
+    async def record(
+        self,
+        session_id: str,
+        suspicion_score: float,
+        was_misdirected: bool,
+    ) -> SessionData:
         if not self._using_fallback:
             try:
                 return await self._redis_manager.record(session_id, suspicion_score, was_misdirected)
             except Exception:
                 self._using_fallback = True
                 logger.warning("Redis unavailable, switching to in-memory fallback")
+        # Uses persistent _fallback (FIX #8: accumulates across calls)
         return await self._fallback.record(session_id, suspicion_score, was_misdirected)
 
     async def health_check(self) -> bool:
         if not self._using_fallback:
             return await self._redis_manager.health_check()
-        return True
+        # Periodic retry to recover Redis (FIX #9)
+        now = time.time()
+        if now - self._last_retry >= RETRY_INTERVAL:
+            self._last_retry = now
+            redis_ok = await self._redis_manager.health_check()
+            if redis_ok:
+                self._using_fallback = False
+                logger.info("Redis recovered, switching back from fallback")
+                return True
+        return True  # In-memory is always "healthy"
 
     @property
     def is_using_redis(self) -> bool:

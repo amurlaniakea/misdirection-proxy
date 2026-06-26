@@ -47,7 +47,7 @@ CATEGORY_DESCRIPTIONS = {
 }
 
 # Default training data path
-DEFAULT_DATA_PATH = Path(__file__).parent.parent.parent / "scripts" / "training_data.json"
+DEFAULT_DATA_PATH = Path(__file__).parent.parent.parent.parent / "scripts" / "training_data.json"
 
 
 @dataclass
