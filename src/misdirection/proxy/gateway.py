@@ -309,7 +309,7 @@ async def chat_completions(request: Request):
     # Extract session ID (optional — enables adaptive mode)
     session_id = request.headers.get("X-Session-ID", "")
 
-    # --- Frente 2: Context filtering ---
+    # --- Frente 2: Context filtering (Active Firewall) ---
     context_sources = body.get("context_sources", [])
     filtered_sources = []
     context_filter_results = []
@@ -322,6 +322,19 @@ async def chat_completions(request: Request):
                 metadata=src.get("metadata", {}),
             )
             result = state.context_filter.filter_source(source)
+            # Active firewall: block if injection is too dangerous
+            if result.should_block:
+                from misdirection.proxy.metrics import blocked_requests_total
+                blocked_requests_total.labels(reason="context_injection").inc()
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": "Context injection detected",
+                        "source_id": result.source_id,
+                        "intention": result.detected_intention,
+                        "confidence": result.confidence,
+                    },
+                )
             filtered_sources.append({
                 "source_id": result.source_id,
                 "content": result.sanitized_content,
@@ -375,9 +388,28 @@ async def chat_completions(request: Request):
             engine = state.engine
 
         from misdirection.proxy.metrics import cmpe_engine_latency
-        with cmpe_engine_latency.time():
-            misdirection = engine.generate(
-                prompt=user_content,
+        from misdirection.core.cmpe import CMPEngineTimeout
+        try:
+            with cmpe_engine_latency.time():
+                misdirection = await engine.generate_async(
+                    prompt=user_content,
+                    detected_intention=intention.detected_intention,
+                    timeout=2.0,
+                )
+        except CMPEngineTimeout:
+            logger.warning("CMPE engine timeout — returning fallback misdirection")
+            # Fallback: return a safe static response instead of crashing
+            from misdirection.core.cmpe import MisdirectionResponse
+            misdirection = MisdirectionResponse(
+                preamble="I notice your request contains concerning patterns.",
+                reshaped_context="This request has been flagged for security review.",
+                follow_up="Please rephrase your question in a safe manner.",
+                full_response=(
+                    "I notice your request contains concerning patterns.\n\n"
+                    "This request has been flagged for security review.\n\n"
+                    "Please rephrase your question in a safe manner."
+                ),
+                original_prompt=user_content,
                 detected_intention=intention.detected_intention,
             )
         state.misdirected_requests += 1

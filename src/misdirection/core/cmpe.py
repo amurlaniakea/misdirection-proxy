@@ -8,9 +8,15 @@ Implements the 3-step misdirection algorithm from Soosahabi & Namsani (2026):
 
 from __future__ import annotations
 
+import asyncio
 import random
 import re
 from dataclasses import dataclass, field
+
+
+class CMPEngineTimeout(Exception):
+    """Raised when CMPE engine exceeds processing time limit."""
+    pass
 
 
 @dataclass
@@ -120,15 +126,20 @@ class CMPEEngine:
         self,
         prompt: str,
         detected_intention: str | None = None,
+        timeout: float = 2.0,
     ) -> MisdirectionResponse:
         """Generate a misdirection response for a detected malicious prompt.
 
         Args:
             prompt: The original (potentially malicious) prompt.
             detected_intention: Optional description of the detected intention.
+            timeout: Maximum processing time in seconds (default 2.0).
 
         Returns:
             MisdirectionResponse with all components.
+
+        Raises:
+            CMPEngineTimeout: If processing exceeds timeout.
         """
         preamble = self._generate_preamble()
         reshaped = self._reshape_prompt(prompt)
@@ -143,6 +154,38 @@ class CMPEEngine:
             full_response=full,
             original_prompt=prompt,
             detected_intention=detected_intention,
+        )
+
+    async def generate_async(
+        self,
+        prompt: str,
+        detected_intention: str | None = None,
+        timeout: float = 2.0,
+    ) -> MisdirectionResponse:
+        """Async version with timeout protection against ReDoS.
+
+        Uses asyncio.wait_for to enforce processing time limit.
+        """
+        try:
+            return await asyncio.wait_for(
+                self._generate_internal(prompt, detected_intention),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            raise CMPEngineTimeout(
+                f"CMPE engine exceeded {timeout}s timeout"
+            )
+
+    async def _generate_internal(
+        self,
+        prompt: str,
+        detected_intention: str | None = None,
+    ) -> MisdirectionResponse:
+        """Internal generation (runs in thread pool to allow timeout)."""
+        # Run CPU-bound work in thread pool to not block event loop
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, self.generate, prompt, detected_intention
         )
 
     def _generate_preamble(self) -> str:

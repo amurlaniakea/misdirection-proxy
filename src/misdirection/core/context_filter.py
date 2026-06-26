@@ -44,6 +44,7 @@ class FilterResult:
     confidence: float
     detected_intention: str | None = None
     transformation_applied: str | None = None
+    should_block: bool = False  # If True, request must be rejected (active firewall)
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +163,8 @@ class ContextFilter:
         # Step 1: Check for direct malicious patterns (reuse existing detector)
         direct = self.detector.detect(content)
         if direct.label == IntentionLabel.MALICIOUS:
+            # Active firewall: high-confidence direct attacks are blocked entirely
+            should_block = direct.confidence >= 0.8
             sanitized = self._neutralize(content, direct)
             return FilterResult(
                 source_id=source.source_id,
@@ -172,6 +175,7 @@ class ContextFilter:
                 confidence=direct.confidence,
                 detected_intention=direct.detected_intention,
                 transformation_applied="direct_neutralization",
+                should_block=should_block,
             )
 
         # Step 2: Check for indirect injection patterns (passive data)
@@ -179,15 +183,19 @@ class ContextFilter:
         if indirect_matches:
             sanitized = self._neutralize_indirect(content, indirect_matches)
             categories = list(indirect_matches.keys())
+            confidence = min(0.5 + 0.1 * sum(len(v) for v in indirect_matches.values()), 0.95)
+            # Active firewall: block if multiple categories or high confidence
+            should_block = len(categories) >= 2 or confidence >= 0.85
             return FilterResult(
                 source_id=source.source_id,
                 original_content=content,
                 sanitized_content=sanitized,
                 was_modified=True,
                 intention_label="malicious",
-                confidence=min(0.5 + 0.1 * sum(len(v) for v in indirect_matches.values()), 0.95),
+                confidence=confidence,
                 detected_intention=f"Indirect injection: {', '.join(categories)}",
                 transformation_applied="indirect_neutralization",
+                should_block=should_block,
             )
 
         # Step 3: Benign — return unchanged
