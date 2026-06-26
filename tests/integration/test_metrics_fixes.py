@@ -25,6 +25,9 @@ def reset_state():
     # Reset session manager to a fresh HybridSessionManager (optimistic default)
     gateway.state.session_manager = HybridSessionManager(redis_url="redis://localhost:6379")
     gateway.state.session_manager._using_fallback = False
+    # Reset rate limiter to avoid rate limit interference between tests
+    from misdirection.proxy.rate_limiter import InMemoryRateLimiter
+    gateway.state.rate_limiter = InMemoryRateLimiter()
     # Update module-level reference used by test methods
     global state
     state = gateway.state
