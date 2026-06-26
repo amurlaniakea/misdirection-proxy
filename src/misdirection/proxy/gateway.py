@@ -13,6 +13,7 @@ Architecture:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -147,8 +148,41 @@ state = GatewayState()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import signal
+    shutdown_event = asyncio.Event()
+
+    def _handle_signal(sig, frame):
+        logger.info("Received signal %s, initiating graceful shutdown...", sig.name)
+        shutdown_event.set()
+
+    loop = asyncio.get_event_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, _handle_signal, sig, None)
+        except NotImplementedError:
+            # Windows fallback
+            signal.signal(sig, lambda s, f: _handle_signal(s, f))
+
     state.start_time = time.time()
+    logger.info("Gateway started (PID %s)", os.getpid())
+
     yield
+
+    # Graceful shutdown: close Redis connections
+    logger.info("Shutting down: closing Redis connections...")
+    try:
+        sm = state.session_manager
+        if hasattr(sm, '_redis_manager'):
+            redis = sm._redis_manager._redis
+            if redis:
+                await redis.close()
+                logger.info("Redis connection closed")
+        elif hasattr(sm, '_redis') and sm._redis:
+            await sm._redis.close()
+            logger.info("Redis connection closed")
+    except Exception as e:
+        logger.warning("Error during Redis cleanup: %s", e)
+    logger.info("Gateway shutdown complete")
 
 
 app = FastAPI(
@@ -163,7 +197,8 @@ app = FastAPI(
 # Auth middleware
 # ---------------------------------------------------------------------------
 
-PROTECTED_PATHS = {"/metrics", "/analyze"}
+PROTECTED_PATHS = {"/metrics", "/analyze", "/v1/chat/completions"}
+MAX_INPUT_LENGTH = int(os.getenv("MAX_INPUT_LENGTH", "10000"))
 
 @app.middleware("http")
 async def require_auth(request, call_next):
@@ -177,6 +212,29 @@ async def require_auth(request, call_next):
                     status_code=401,
                     content={"error": "Unauthorized — valid Bearer token required"},
                 )
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def limit_payload_size(request, call_next):
+    """Reject oversized payloads before they reach detectors (DoS protection)."""
+    from starlette.requests import Request as StarletteRequest
+
+    if request.method == "POST":
+        body = await request.body()
+        if len(body) > MAX_INPUT_LENGTH:
+            return JSONResponse(
+                status_code=413,
+                content={
+                    "error": "Payload too Large",
+                    "max_bytes": MAX_INPUT_LENGTH,
+                    "received_bytes": len(body),
+                },
+            )
+        # Re-wrap so downstream handlers can re-read the body
+        async def receive():
+            return {"type": "http.request", "body": body}
+        request = StarletteRequest(request.scope, receive)
     return await call_next(request)
 
 
