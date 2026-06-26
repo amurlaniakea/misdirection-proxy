@@ -23,6 +23,32 @@ import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+# ---------------------------------------------------------------------------
+# Structured JSON logging
+# ---------------------------------------------------------------------------
+
+class JSONFormatter(logging.Formatter):
+    """Output logs as single-line JSON for production observability."""
+
+    def format(self, record):
+        import json
+        log_entry = {
+            "timestamp": self.formatTime(record),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        if record.exc_info and record.exc_info[0] is not None:
+            log_entry["exception"] = self.formatException(record.exc_info)
+        return json.dumps(log_entry)
+
+# Apply JSON formatter if GATEWAY_LOG_FORMAT=json
+if os.getenv("GATEWAY_LOG_FORMAT", "") == "json":
+    handler = logging.StreamHandler()
+    handler.setFormatter(JSONFormatter())
+    logging.root.handlers = [handler]
+    logging.root.setLevel(logging.INFO)
+
 from misdirection.core.adaptive import (
     AdaptiveConfig,
     AdaptiveController,
@@ -37,6 +63,7 @@ from misdirection.core.session_manager import (
     SessionData,
 )
 from misdirection.detector.intention import IntentionDetector, IntentionLabel
+from misdirection.detector.hybrid_detector import HybridDetector, MLDetectorConfig
 from misdirection.eval.metrics import (
     DefenseConfig,
     JudgeProfile,
@@ -62,7 +89,7 @@ class GatewayState:
     """Shared state for the gateway."""
 
     def __init__(self):
-        self.detector = IntentionDetector()
+        self.detector = self._init_detector()
         self.engine = CMPEEngine(config=CMPEConfig())
         self.proxy_config = ProxyConfig(
             cmpe_config=CMPEConfig(),
@@ -85,6 +112,17 @@ class GatewayState:
             "UPSTREAM_LLM_URL", "http://localhost:11434"
         )
         self.upstream_api_key: str = os.getenv("UPSTREAM_LLM_API_KEY", "")
+
+    def _init_detector(self):
+        """Initialize detector: ML hybrid if HYBRID_DETECTOR=1, else regex-only."""
+        if os.getenv("HYBRID_DETECTOR", "0") == "1":
+            try:
+                detector = HybridDetector()
+                logger.info("Hybrid detector initialized (ML + regex fallback)")
+                return detector
+            except Exception as e:
+                logger.warning("Hybrid detector failed (%s), using regex-only", e)
+        return IntentionDetector()
 
     def _init_session_manager(self) -> SessionManager:
         """Initialize session manager: Hybrid (Redis + in-memory fallback) if REDIS_URL is set."""
@@ -118,6 +156,27 @@ app = FastAPI(
     version="0.2.0",
     lifespan=lifespan,
 )
+
+
+# ---------------------------------------------------------------------------
+# Auth middleware
+# ---------------------------------------------------------------------------
+
+PROTECTED_PATHS = {"/metrics", "/analyze"}
+
+@app.middleware("http")
+async def require_auth(request, call_next):
+    """Require Bearer token for protected endpoints."""
+    if request.url.path in PROTECTED_PATHS:
+        token = os.getenv("GATEWAY_API_KEY", "")
+        if token:
+            auth = request.headers.get("Authorization", "")
+            if not auth.startswith("Bearer ") or auth[7:] != token:
+                return JSONResponse(
+                    status_code=401,
+                    content={"error": "Unauthorized — valid Bearer token required"},
+                )
+    return await call_next(request)
 
 
 # ---------------------------------------------------------------------------
