@@ -94,4 +94,5 @@ def test_health_no_auth_required():
 
     client = TestClient(app)
     response = client.get("/health")
-    assert response.status_code == 200
+    # Health is public, but may return 503 if components are degraded
+    assert response.status_code in (200, 503)

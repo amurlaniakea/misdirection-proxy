@@ -199,7 +199,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Misdirection Gateway",
     description="Defensive Misdirection Proxy for AI Agents",
-    version="0.2.0",
+    version="0.6.0",
     lifespan=lifespan,
 )
 
@@ -219,6 +219,8 @@ async def require_auth(request, call_next):
         if token:
             auth = request.headers.get("Authorization", "")
             if not auth.startswith("Bearer ") or auth[7:] != token:
+                from misdirection.proxy.metrics import blocked_requests_total
+                blocked_requests_total.labels(reason="auth_failure").inc()
                 return JSONResponse(
                     status_code=401,
                     content={"error": "Unauthorized — valid Bearer token required"},
@@ -234,6 +236,8 @@ async def limit_payload_size(request, call_next):
     if request.method == "POST":
         body = await request.body()
         if len(body) > MAX_INPUT_LENGTH:
+            from misdirection.proxy.metrics import blocked_requests_total
+            blocked_requests_total.labels(reason="payload_too_large").inc()
             return JSONResponse(
                 status_code=413,
                 content={
@@ -265,6 +269,8 @@ async def rate_limit(request, call_next):
         client_key, state.rate_limit, 60
     )
     if not allowed:
+        from misdirection.proxy.metrics import blocked_requests_total
+        blocked_requests_total.labels(reason="rate_limited").inc()
         return JSONResponse(
             status_code=429,
             content={
@@ -368,10 +374,12 @@ async def chat_completions(request: Request):
         else:
             engine = state.engine
 
-        misdirection = engine.generate(
-            prompt=user_content,
-            detected_intention=intention.detected_intention,
-        )
+        from misdirection.proxy.metrics import cmpe_engine_latency
+        with cmpe_engine_latency.time():
+            misdirection = engine.generate(
+                prompt=user_content,
+                detected_intention=intention.detected_intention,
+            )
         state.misdirected_requests += 1
         misdirections_total.inc()
 
@@ -426,14 +434,52 @@ async def chat_completions(request: Request):
 
 
 @app.get("/health")
-async def health():
-    """Health check endpoint."""
+async def health(request: Request):
+    """Health check with active readiness probe.
+
+    Checks Redis connectivity and upstream LLM reachability.
+    Returns 200 if all healthy, 503 if any critical service is down.
+    """
     uptime = time.time() - state.start_time if state.start_time else 0
-    return {
-        "status": "healthy",
-        "version": "0.2.0",
+    components = {}
+    all_healthy = True
+
+    # Check Redis
+    try:
+        redis_ok = await state.session_manager.health_check()
+        # Also check if we're actually using Redis (not in fallback)
+        using_redis = getattr(state.session_manager, 'is_using_redis', True)
+        if redis_ok and using_redis:
+            components["redis"] = "healthy"
+        elif redis_ok and not using_redis:
+            components["redis"] = "degraded"  # In-memory fallback active
+            all_healthy = False
+        else:
+            components["redis"] = "unhealthy"
+            all_healthy = False
+    except Exception:
+        components["redis"] = "unhealthy"
+        all_healthy = False
+
+    # Check upstream LLM reachability (lightweight TCP connect, no full request)
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            # Try root path — any response (even 404) means reachable
+            r = await client.get(f"{state.upstream_base_url}/")
+            components["upstream"] = "healthy"
+    except Exception:
+        components["upstream"] = "unhealthy"
+        all_healthy = False
+
+    status_code = 200 if all_healthy else 503
+    response = {
+        "status": "healthy" if all_healthy else "degraded",
+        "version": "0.6.0",
         "uptime_seconds": round(uptime, 1),
+        "components": components,
     }
+    return JSONResponse(content=response, status_code=status_code)
 
 
 @app.get("/metrics")
@@ -442,18 +488,31 @@ async def metrics():
 
     Returns metrics in Prometheus text exposition format.
     """
-    # Update Redis health gauge and trigger retry (FIX #11 + #12)
-    from misdirection.proxy.metrics import redis_healthy
+    from misdirection.proxy.metrics import (
+        redis_healthy, rate_limiter_fallback_active,
+        circuit_breaker_state,
+    )
+    from misdirection.proxy.circuit_breaker import CircuitState
 
-    # is_using_redis is a property (bool), not a method — don't call it
+    # Update Redis health gauge and trigger retry (FIX #11 + #12)
     redis_val = 1 if getattr(state.session_manager, 'is_using_redis', False) else 0
     redis_healthy.set(redis_val)
 
+    # Update rate limiter fallback status
+    rate_limiter_fallback_active.set(0)  # TODO: expose from rate_limiter when Redis fails
+
+    # Update circuit breaker state
+    cb_state_map = {
+        CircuitState.CLOSED: 0,
+        CircuitState.HALF_OPEN: 1,
+        CircuitState.OPEN: 2,
+    }
+    circuit_breaker_state.set(cb_state_map.get(state.circuit_breaker.state, 0))
+
     # Trigger periodic retry if in fallback (FIX #12)
-    # Each Prometheus scrape (15-30s) acts as the retry trigger
     from contextlib import suppress
     with suppress(Exception):
-        await state.session_manager.health_check()  # health_check failures are non-fatal for metrics endpoint
+        await state.session_manager.health_check()
 
     body, content_type = get_metrics_response()
     return Response(content=body, media_type=content_type)

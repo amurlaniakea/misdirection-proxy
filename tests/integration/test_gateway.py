@@ -24,10 +24,14 @@ def client():
 class TestHealthEndpoint:
     def test_health_returns_ok(self, client):
         response = client.get("/health")
-        assert response.status_code == 200
+        # Health may be 200 (healthy) or 503 (degraded if upstream/Redis down)
+        assert response.status_code in (200, 503)
         data = response.json()
-        assert data["status"] == "healthy"
-        assert data["version"] == "0.2.0"
+        assert data["status"] in ("healthy", "degraded")
+        assert data["version"] == "0.6.0"
+        assert "components" in data
+        assert "redis" in data["components"]
+        assert "upstream" in data["components"]
 
 
 class TestAnalyzeEndpoint:
