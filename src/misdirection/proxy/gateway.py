@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 from contextlib import asynccontextmanager
 from typing import Any
@@ -23,6 +24,44 @@ from typing import Any
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from pydantic import BaseModel, Field
+
+
+# ---------------------------------------------------------------------------
+# API Models (OpenAPI schemas)
+# ---------------------------------------------------------------------------
+
+
+class AnalyzeRequest(BaseModel):
+    """Request model for prompt analysis."""
+    prompt: str = Field(
+        ...,
+        description="The prompt text to analyze for malicious intent",
+        max_length=10000,
+        examples=["What is Python?"],
+    )
+
+
+class AnalyzeResponse(BaseModel):
+    """Response model for prompt analysis."""
+    prompt: str = Field(description="The analyzed prompt (with secrets redacted)")
+    label: str = Field(description="Classification label: benign, suspicious, malicious")
+    confidence: float = Field(description="Confidence score (0.0 to 1.0)")
+    detected_intention: str | None = Field(description="Description of detected intention")
+    matched_patterns: list[str] | None = Field(description="List of matched detection patterns")
+
+
+class HealthResponse(BaseModel):
+    """Response model for health check."""
+    status: str = Field(description="Overall health status: healthy or degraded")
+    version: str = Field(description="Gateway version")
+    uptime_seconds: float = Field(description="Uptime in seconds")
+    components: dict[str, str] = Field(description="Health status of each component")
+
+
+class ErrorResponse(BaseModel):
+    """Standard error response."""
+    error: str = Field(description="Error description")
 
 # ---------------------------------------------------------------------------
 # Structured JSON logging
@@ -224,6 +263,50 @@ app = FastAPI(
     version="0.8.0",
     lifespan=lifespan,
 )
+
+
+def _redact_secrets(text: str) -> str:
+    """Redact sensitive data from text before logging or returning.
+
+    Patterns:
+    - API keys: sk-..., ak-..., pk-...
+    - Passwords: password=xxx, "password": "xxx"
+    - Tokens: Bearer xxx, token=xxx
+    - Generic secrets: secret=xxx, api_key=xxx
+    """
+    if not text:
+        return text
+
+    # API keys (OpenAI, Anthropic, etc.)
+    text = re.sub(r'\b(sk|ak|pk)-[a-zA-Z0-9]{20,}\b', '[REDACTED_API_KEY]', text)
+
+    # Password patterns
+    text = re.sub(
+        r'(?i)(password|passwd|pwd)\s*[:=]\s*[^\s&,"\']+',
+        r'\1=[REDACTED_PASSWORD]',
+        text,
+    )
+
+    # Token patterns
+    text = re.sub(
+        r'(?i)(bearer\s+)[a-zA-Z0-9_\-\.]+',
+        r'\1[REDACTED_TOKEN]',
+        text,
+    )
+    text = re.sub(
+        r'(?i)(token|api_key|secret|access_token)\s*[:=]\s*[^\s&,"\']+',
+        r'\1=[REDACTED_SECRET]',
+        text,
+    )
+
+    # Generic high-entropy strings that look like secrets (32+ hex/base64)
+    text = re.sub(
+        r'\b([a-f0-9]{32,}|[A-Za-z0-9+/]{40,}={0,2})\b',
+        '[REDACTED_HASH]',
+        text,
+    )
+
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -487,7 +570,17 @@ async def chat_completions(request: Request):
     return await _forward_to_upstream(body)
 
 
-@app.get("/health")
+@app.get(
+    "/health",
+    response_model=HealthResponse,
+    summary="Health check with readiness probe",
+    description="Returns health status of the gateway and its dependencies (Redis, upstream LLM).",
+    responses={
+        200: {"description": "All components healthy"},
+        503: {"description": "One or more components degraded", "model": HealthResponse},
+    },
+    tags=["System"],
+)
 async def health(request: Request):
     """Health check with active readiness probe.
 
@@ -572,7 +665,20 @@ async def metrics():
     return Response(content=body, media_type=content_type)
 
 
-@app.post("/analyze")
+@app.post(
+    "/analyze",
+    response_model=AnalyzeResponse,
+    summary="Analyze prompt for malicious intent",
+    description="Analyzes a prompt and returns intention classification without proxying to upstream LLM.",
+    responses={
+        200: {"description": "Analysis complete"},
+        400: {"description": "Missing prompt field", "model": ErrorResponse},
+        401: {"description": "Unauthorized", "model": ErrorResponse},
+        413: {"description": "Payload too large", "model": ErrorResponse},
+        429: {"description": "Rate limit exceeded", "model": ErrorResponse},
+    },
+    tags=["Analysis"],
+)
 async def analyze(request: Request):
     """Analyze a prompt without proxying — returns intention analysis."""
     body = await request.json()
@@ -583,8 +689,11 @@ async def analyze(request: Request):
 
     intention = state.detector.detect(prompt)
 
+    # Redact secrets from the prompt before returning
+    redacted_prompt = _redact_secrets(prompt)
+
     return {
-        "prompt": prompt,
+        "prompt": redacted_prompt,
         "label": intention.label.value,
         "confidence": intention.confidence,
         "detected_intention": intention.detected_intention,
