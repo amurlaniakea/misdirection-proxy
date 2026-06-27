@@ -221,7 +221,7 @@ class ContextFilter:
                     matches.setdefault(category, []).append(pattern.pattern)
         return matches
 
-    def _neutralize(self, content: str, intention) -> str:
+    def _neutralize(self, content: str, _) -> str:
         """Neutralize directly malicious content.
 
         Strategy: Try indirect neutralization first to preserve benign parts.

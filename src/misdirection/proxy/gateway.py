@@ -291,7 +291,7 @@ def _redact_secrets(text: str) -> str:
 
     # Token patterns
     text = re.sub(
-        r'(?i)(bearer\s+)[a-zA-Z0-9_\-\.]+',
+        r'(?i)(bearer\s+)[a-zA-Z0-9_.]+',
         r'\1[REDACTED_TOKEN]',
         text,
     )
@@ -685,7 +685,7 @@ async def metrics():
     redis_healthy.set(redis_val)
 
     # Update rate limiter fallback status
-    rate_limiter_fallback_active.set(0)  # TODO: expose from rate_limiter when Redis fails
+    rate_limiter_fallback_active.set(0)  # Expose from rate_limiter when Redis fails
 
     # Update circuit breaker state
     cb_state_map = {

@@ -235,7 +235,7 @@ class CMPEEngine:
 
         return expanded
 
-    def _generate_followup(self, prompt: str) -> str:
+    def _generate_followup(self, _) -> str:
         """Step 3: Generate a follow-up question for conversational branching."""
         return self._rng.choice(_FOLLOWUP_TEMPLATES)
 
