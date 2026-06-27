@@ -371,7 +371,7 @@ def run_benchmark(
 
     report.compute_metrics()
     print("-" * 70)
-    print(f"[bench] Results:")
+    print("[bench] Results:")
     print(f"  Total requests:     {report.total_requests}")
     print(f"  Misdirected:        {report.misdirected_count} ({report.misdirected_count/max(report.total_requests,1)*100:.1f}%)")
     print(f"  Judge 'success':    {report.judge_success_count}")

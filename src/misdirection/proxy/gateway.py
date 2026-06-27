@@ -652,7 +652,7 @@ async def health(request: Request):
         import httpx
         async with httpx.AsyncClient(timeout=5.0) as client:
             # Try root path — any response (even 404) means reachable
-            r = await client.get(f"{state.upstream_base_url}/")
+            await client.get(f"{state.upstream_base_url}/")
             components["upstream"] = "healthy"
     except Exception:
         components["upstream"] = "unhealthy"
